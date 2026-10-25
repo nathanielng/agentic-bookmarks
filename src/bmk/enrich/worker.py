@@ -348,11 +348,21 @@ class BackgroundWorker:
         self._stop.set()
         self._wake.set()
 
+    def _scan_duplicates(self) -> None:
+        from .. import dedupe
+
+        lib = Library(dbmod.connect(self.config.db_path, migrate=False), self.config, actor="dedupe")
+        try:
+            dedupe.scan(lib)
+        finally:
+            lib.close()
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             self.running = True
             try:
-                Worker(self.config).run(budget=600)
+                if Worker(self.config).run(budget=600):
+                    self._scan_duplicates()  # fetched text and canonical hints feed tier 4
             except Exception:
                 log.exception("background enrichment failed")
             finally:

@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__, doctor, launchd
+from . import __version__, dedupe, doctor, launchd
 from . import export as exporter
 from . import db as dbmod
 from .config import Config, get_config
@@ -69,6 +69,12 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
     def kick() -> None:
         if worker is not None:
             worker.kick()
+
+    def after_ingest() -> None:
+        """New bookmarks: look for duplicates now, and fetch their pages in the background."""
+        with library() as lib:
+            dedupe.scan(lib)
+        kick()
 
     app = FastAPI(title="bmk", version=__version__, docs_url=None, redoc_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
@@ -123,6 +129,7 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
                 "queue": lib.queue_stats(),
                 "enrich": Worker is not None,
                 "worker_running": bool(worker and worker.running),
+                "duplicates": dedupe.cluster_count(lib),
             }
 
     @app.get("/api/bookmarks")
@@ -253,8 +260,49 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
             except CloudTabsError as exc:
                 kind = "permission" if isinstance(exc, CloudTabsPermissionDenied) else "source"
                 return JSONResponse({"detail": str(exc), "kind": kind}, status_code=503)
-        kick()
+        after_ingest()
         return JSONResponse({"run_id": summary.run_id, "counts": summary.counts, "line": summary.line()})
+
+    # ------------------------------------------------------------------ duplicates
+
+    @app.get("/api/duplicates")
+    def duplicates() -> dict[str, Any]:
+        with library() as lib:
+            return {"clusters": dedupe.clusters(lib)}
+
+    @app.post("/api/duplicates/scan")
+    def duplicates_scan() -> dict[str, Any]:
+        with library() as lib:
+            return dedupe.scan(lib)
+
+    @app.post("/api/duplicates/merge")
+    def duplicates_merge(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """{keep: id, ids: [all ids in the group]}: merge the others into `keep`."""
+        keep = payload.get("keep")
+        if not isinstance(keep, int):
+            raise HTTPException(400, "keep must be a bookmark id")
+        with library() as lib:
+            return lib.merge_bookmarks(keep, [int(i) for i in payload.get("ids", [])], reason=payload.get("reason") or "merged by hand")
+
+    @app.post("/api/duplicates/dismiss")
+    def duplicates_dismiss(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        with library() as lib, dbmod.transaction(lib.conn):
+            return {"pairs": lib.mark_not_duplicates([int(i) for i in payload.get("ids", [])])}
+
+    @app.post("/api/duplicates/apply")
+    def duplicates_apply(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        with library() as lib:
+            done = dedupe.apply(lib, float(payload.get("min_confidence", 0.95)), payload.get("tier"))
+        return {"groups": len(done), "merges": [i for d in done for i in d["merges"]]}
+
+    @app.post("/api/merges/{merge_id}/unmerge")
+    def unmerge(merge_id: int, remember: bool = True) -> dict[str, Any]:
+        """`remember=false` (the Undo right after a merge) leaves the pair proposable; otherwise it is
+        recorded as not duplicates."""
+        with library() as lib:
+            result = lib.unmerge(merge_id, remember=remember)
+            dedupe.scan(lib)
+            return result
 
     async def upload(request: Request) -> bytes:
         data = await request.body()
@@ -306,7 +354,7 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
 
         result = await run_in_threadpool(work)
         if result.status == "imported":
-            kick()
+            after_ingest()
         code = {"imported": 200, "unchanged": 200, "needs_columns": 409}.get(result.status, 422)
         return JSONResponse({**result.as_dict(), "detail": result.error}, status_code=code)
 
@@ -321,14 +369,14 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
             except FileFormatError as exc:
                 return JSONResponse({"detail": str(exc)}, status_code=503)
         if result.status == "imported":
-            kick()
+            after_ingest()
         return JSONResponse({**result.as_dict(), "detail": result.error}, status_code=200 if result.status == "imported" else 422)
 
     @app.post("/api/bookmarks")
     def add(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         with library() as lib:
             outcome, bookmark_id = lib.add(payload.get("url", ""), title=payload.get("title"), remarks=payload.get("remarks"))
-        kick()
+        after_ingest()
         return {"outcome": outcome, "id": bookmark_id}
 
     return app

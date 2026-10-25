@@ -19,6 +19,9 @@ tracking_params:
   - mkt_tok
   - yclid
   - __s
+  - gad_*         # Google Ads click parameters (gad_source, gad_campaignid)
+  - ttclid        # TikTok ads
+  - srsltid       # Google Shopping
 
 # Extra tracking parameters per registrable domain.
 domain_tracking_params:

@@ -214,3 +214,23 @@ pre.log { max-height: 420px; overflow: auto; }
 .picker td.pick-url, .picker th.pick-url { background: var(--accent-bg); }
 .picker .buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+
+/* Duplicates review */
+#panel-duplicates { padding: 0 16px 24px; }
+.dup-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+.dup-head h2 { font-size: 15px; margin: 14px 0 0; }
+.dup-head p { flex-basis: 100%; margin: 4px 0 8px; }
+.dup-card { border: 1px solid var(--border); border-radius: 8px; margin: 12px 0; background: var(--bg); }
+.dup-card > header { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.dup-card > footer { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
+.dup-badge { font-weight: 600; font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--badge-bg); }
+.dup-card.tier3 .dup-badge { background: var(--accent-bg); color: var(--accent); }
+.dup-why { color: var(--muted); font-size: 12px; }
+.dup-table-wrap { overflow-x: auto; }
+.dup-table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+.dup-table th, .dup-table td { text-align: left; vertical-align: top; padding: 4px 12px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.dup-table tbody th { width: 80px; color: var(--muted); font-weight: 500; font-size: 12px; }
+.dup-table thead th { font-weight: 600; }
+.dup-table tr.diff td { background: var(--warn-bg); }
+.dup-table .clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+p.empty { color: var(--muted); padding: 20px 0; }

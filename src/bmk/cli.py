@@ -22,6 +22,8 @@ from .timeutil import display, now_utc
 app = typer.Typer(help="Local-first bookmarks manager.", no_args_is_help=True, add_completion=False)
 ingest_app = typer.Typer(help="Import bookmarks from a source.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
+dedupe_app = typer.Typer(help="Find and review duplicates (merges can be undone).", no_args_is_help=True)
+app.add_typer(dedupe_app, name="dedupe")
 
 console = Console()
 err = Console(stderr=True)
@@ -108,7 +110,20 @@ def ingest_cloudtabs(
 
 
 def _auto_process(cfg) -> None:
-    """Enrich new bookmarks right after an ingest, and so after every background scan."""
+    """Enrich new bookmarks right after an ingest (and so after every background scan), then look for duplicates."""
+    try:
+        _enrich_after_ingest(cfg)
+    finally:
+        from . import dedupe
+
+        lib = _lib()
+        try:
+            dedupe.scan(lib)
+        finally:
+            lib.close()
+
+
+def _enrich_after_ingest(cfg) -> None:
     if not cfg.enrich or cfg.process_budget <= 0:
         return
     try:
@@ -468,6 +483,129 @@ def export(
         err.print(f"wrote {output}")
     else:
         sys.stdout.write(text)
+
+
+def _cluster_table(cluster: dict, tz: str) -> Table:
+    pair = cluster["pairs"][0]
+    table = Table(title=f"{cluster['confidence']:.2f} · tier {cluster['tier']} · {pair['rationale']}", title_justify="left",
+                  box=box.SIMPLE_HEAD, header_style="bold")  # fmt: skip
+    for col in ("", "ID", "Title", "URL", "Saved", "Sources"):
+        table.add_column(col, overflow="fold")
+    for b in cluster["bookmarks"]:
+        table.add_row(
+            "★" if b["id"] == cluster["suggested"] else "", str(b["id"]), escape(b["title"] or "—"), escape(b["url"]),
+            display(b["saved_at"], b["saved_at_source"], tz), str(len(b["sources"])),
+        )  # fmt: skip
+    return table
+
+
+@dedupe_app.command("scan")
+def dedupe_scan() -> None:
+    """Look for likely duplicates (tier 3 URL variants, tier 4 same page) and list them for review."""
+    from . import dedupe
+
+    lib = _lib()
+    stats = dedupe.scan(lib)
+    console.print(f"{stats['clusters']} groups to review ({stats['tier3']} URL variants, {stats['tier4']} same-page pairs)")
+
+
+@dedupe_app.command("show")
+def dedupe_show(min_confidence: Annotated[float, typer.Option("--min-confidence")] = 0.0) -> None:
+    """Show proposed duplicate groups (★ = suggested one to keep), most confident first."""
+    from . import dedupe
+
+    lib = _lib()
+    dedupe.scan(lib)
+    groups = [c for c in dedupe.clusters(lib) if c["confidence"] >= min_confidence]
+    for cluster in groups:
+        console.print(_cluster_table(cluster, lib.config.display_tz))
+    console.print(f"{len(groups)} groups. Merge with `bmk dedupe merge KEEP OTHER…`, or `bmk dedupe dismiss ID ID…`.")
+
+
+@dedupe_app.command("merge")
+def dedupe_merge(
+    keep: Annotated[int, typer.Argument(help="The bookmark to keep.")],
+    others: Annotated[list[int], typer.Argument(help="Bookmarks to merge into it.")],
+) -> None:
+    """Merge bookmarks into the one to keep (sources, remarks, tags and dates are combined)."""
+    lib = _lib()
+    try:
+        result = lib.merge_bookmarks(keep, others)
+    except (NotFound, Conflict, ValueError) as exc:
+        _fail(str(exc))
+    console.print(f"merged {', '.join(map(str, others))} into {keep} (undo: bmk dedupe unmerge {' '.join(map(str, result['merges']))})")
+
+
+@dedupe_app.command("dismiss")
+def dedupe_dismiss(bookmark_ids: list[int]) -> None:
+    """Mark bookmarks as different pages; they are never proposed as duplicates again."""
+    lib = _lib()
+    with dbmod.transaction(lib.conn):
+        n = lib.mark_not_duplicates(bookmark_ids)
+    console.print(f"remembered {n} pair(s) as not duplicates")
+
+
+@dedupe_app.command("apply")
+def dedupe_apply(
+    min_confidence: Annotated[float, typer.Option("--min-confidence", help="Only groups whose every pair is at least this.")] = 0.95,
+    tier: Annotated[Optional[int], typer.Option(help="Only this tier (3 = URL variants).")] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Merge without listing first.")] = False,
+) -> None:
+    """Merge every proposed group above a confidence, each into its suggested bookmark."""
+    from . import dedupe
+
+    lib = _lib()
+    dedupe.scan(lib)
+    groups = [c for c in dedupe.clusters(lib) if c["min_confidence"] >= min_confidence and (tier is None or all(p["tier"] == tier for p in c["pairs"]))]
+    if not groups:
+        console.print("nothing to merge")
+        return
+    if not yes:
+        for cluster in groups:
+            console.print(_cluster_table(cluster, lib.config.display_tz))
+        typer.confirm(f"Merge these {len(groups)} groups?", abort=True)
+    done = dedupe.apply(lib, min_confidence, tier)
+    console.print(f"merged {len(done)} groups (merge ids {', '.join(str(i) for d in done for i in d['merges'])})")
+
+
+@dedupe_app.command("unmerge")
+def dedupe_unmerge(merge_ids: list[int]) -> None:
+    """Undo merges (ids from `bmk dedupe history`); the pair is then never proposed again."""
+    lib = _lib()
+    for merge_id in merge_ids:
+        try:
+            result = lib.unmerge(merge_id)
+        except (NotFound, Conflict) as exc:
+            _fail(str(exc))
+        kept = f"; kept later edits to {', '.join(result['kept_edits'])}" if result["kept_edits"] else ""
+        console.print(f"merge {merge_id} undone: {result['restored']} is separate from {result['survivor']} again{kept}")
+
+
+@dedupe_app.command("history")
+def dedupe_history(limit: Annotated[int, typer.Option("--limit", "-n")] = 30) -> None:
+    """Recent merges, automatic and by hand."""
+    lib = _lib()
+    table = Table("Merge", "Kept", "Merged", "Tier", "Reason", "When", "Undone", box=box.SIMPLE_HEAD, header_style="bold")
+    for m in lib.merges(limit=limit):
+        table.add_row(
+            str(m["id"]), str(m["survivor_id"]), str(m["loser_id"]), str(m["tier"] or ""), m["reason"],
+            display(m["merged_at"], "exact", lib.config.display_tz), display(m["reverted_at"], "exact", lib.config.display_tz) if m["reverted_at"] else "",
+        )  # fmt: skip
+    console.print(table)
+
+
+@dedupe_app.command("recanonicalise")
+def dedupe_recanonicalise(dry_run: Annotated[bool, typer.Option("--dry-run", help="Report without changing anything.")] = False) -> None:
+    """Recompute canonical URLs after editing rules/canonicalize.yaml; bookmarks that now match are merged."""
+    from . import dedupe
+
+    lib = _lib()
+    result = dedupe.recanonicalise(lib, dry_run=dry_run)
+    for change in result["changes"]:
+        what = f"merge into {change['merge_with']}" if "merge_with" in change else "update"
+        console.print(f"#{change['id']}: {escape(change['from'])} → {escape(change['to'])} ({what})", highlight=False)
+    prefix = "would change" if dry_run else "changed"
+    console.print(f"{prefix}: {result['canonical']} canonical URLs, {result['loose']} loose keys, {result['merged']} merges, {result['aliases']} new aliases")
 
 
 @app.command("import-backup")

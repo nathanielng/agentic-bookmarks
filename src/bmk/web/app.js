@@ -168,12 +168,13 @@ async function loadMeta() {
   for (const a of document.querySelectorAll("[data-panel]")) {
     a.classList.toggle("active", state.panel === a.dataset.panel);
   }
+  $("#dup-count").textContent = meta.duplicates || "";
   banner(meta.last_cloudtabs_run);
 }
 
 function showPanel(panel) {
   state.panel = panel;
-  for (const p of ["bookmarks", "runs", "health"]) $(`#panel-${p}`).hidden = p !== panel;
+  for (const p of ["bookmarks", "duplicates", "runs", "health"]) $(`#panel-${p}`).hidden = p !== panel;
   if (panel !== "bookmarks") closeDetail();
 }
 
@@ -583,9 +584,21 @@ async function openDetail(id) {
         el("td", {}, fmtDate(s.first_seen_at)), el("td", {}, fmtDate(s.last_seen_at)),
       ))),
     ),
+    b.merges.length ? el("h3", {}, "Merges") : null,
+    b.merges.length ? el("ul", { class: "events" }, ...b.merges.map((m) => el("li", {},
+      `${fmtDate(m.merged_at)} · `,
+      m.survivor_id === b.id
+        ? el("span", {}, el("a", { href: "#", onclick: (e) => { e.preventDefault(); openDetail(m.loser_id); } }, `#${m.loser_id}`), " merged into this")
+        : el("span", {}, "merged into ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openDetail(m.survivor_id); } }, `#${m.survivor_id}`)),
+      ` · ${m.reason}`,
+      m.reverted_at ? el("span", { class: "muted" }, ` · undone ${fmtDate(m.reverted_at)}`)
+        : el("button", { class: "link", title: "Separate them again; they won't be proposed as duplicates again",
+          onclick: () => unmerge([m.id], b.id) }, "Undo merge"),
+    ))) : null,
     b.events.length ? el("h3", {}, "History") : null,
     b.events.length ? el("ul", { class: "events" }, ...b.events.map((e) =>
-      el("li", {}, `${fmtDate(e.at)} · ${e.actor} · ${e.kind}`, e.data_json ? el("code", {}, ` ${e.data_json}`) : null))) : null,
+      el("li", {}, `${fmtDate(e.at)} · ${e.actor} · ${e.kind}`,
+        e.data_json ? el("code", { title: e.data_json }, ` ${e.data_json.length > 200 ? e.data_json.slice(0, 200) + "…" : e.data_json}`) : null))) : null,
   );
   pane.hidden = false;
 }
@@ -784,6 +797,125 @@ async function scan() {
   }
 }
 
+// ------------------------------------------------------------------ duplicates
+
+const TIER_LABELS = { 3: "URL variants", 4: "Same page" };
+const DUP_FIELDS = [
+  ["Title", (b) => b.title || "—"],
+  ["URL", (b) => b.url],
+  ["Saved", (b) => fmtDate(b.saved_at, b.saved_at_source)],
+  ["List", (b) => (b.deleted_at ? "Trash" : b.status === "kept" ? (b.starred ? "Kept ★" : "Kept") : "Inbox")],
+  ["Sources", (b) => b.sources.map((s) => sourceLabel(s.source_ref) || s.source_type).join(", ") || "—"],
+  ["Remarks", (b) => b.remarks || "—"],
+  ["Tags", (b) => b.tags.join(", ") || "—"],
+  ["Summary", (b) => b.description || "—"],
+];
+const skipped = new Set(); // groups skipped for now (until the page reloads)
+
+async function loadDuplicates() {
+  const panel = $("#panel-duplicates");
+  fill(panel, el("p", { class: "muted" }, "Looking for duplicates…"));
+  await api("POST", "/api/duplicates/scan");
+  const { clusters } = await api("GET", "/api/duplicates");
+  await loadMeta();
+  const shown = clusters.filter((c) => !skipped.has(c.ids.join(",")));
+  const variants = shown.filter((c) => c.min_confidence >= 0.95);
+  fill(panel,
+    el("div", { class: "dup-head" },
+      el("h2", {}, "Duplicates"),
+      el("p", { class: "muted" },
+        "Bookmarks that look like the same page. Nothing is merged until you choose; a merge keeps every source, ",
+        "remark and tag, and can be undone from the bookmark's details."),
+      variants.length > 1
+        ? el("button", { onclick: () => mergeAll(variants) }, `Merge all ${variants.length} URL-variant groups`)
+        : null,
+    ),
+    shown.length ? null : el("p", { class: "empty" }, clusters.length ? "Nothing left to review on this page (reload to see skipped groups)." : "No duplicates found."),
+    ...shown.map(clusterCard),
+  );
+}
+
+function clusterCard(cluster) {
+  let keep = cluster.suggested;
+  const name = `keep-${cluster.ids.join("-")}`;
+  const cells = (fn) => cluster.bookmarks.map((b) => fn(b));
+  const differs = (fn) => new Set(cluster.bookmarks.map(fn)).size > 1;
+  const why = cluster.pairs.map((p) => p.rationale).filter((r, i, all) => all.indexOf(r) === i);
+  const card = el("article", { class: `dup-card tier${cluster.tier}` },
+    el("header", {},
+      el("span", { class: "dup-badge" }, `${TIER_LABELS[cluster.tier] || `Tier ${cluster.tier}`} · ${Math.round(cluster.confidence * 100)}%`),
+      el("span", { class: "dup-why" }, why.join(" · ")),
+    ),
+    el("div", { class: "dup-table-wrap" },
+      el("table", { class: "dup-table" },
+        el("thead", {}, el("tr", {}, el("th", {}, ""), ...cells((b) => el("th", {},
+          el("label", { title: "Keep this one; the others are merged into it" },
+            el("input", { type: "radio", name, value: b.id, checked: b.id === keep ? "" : null, onchange: () => { keep = b.id; } }),
+            ` Keep #${b.id}`, b.id === cluster.suggested ? el("span", { class: "muted" }, " (suggested)") : null),
+        )))),
+        el("tbody", {}, ...DUP_FIELDS.map(([label, fn]) => el("tr", { class: differs(fn) ? "diff" : "" },
+          el("th", {}, label),
+          ...cells((b) => el("td", {}, label === "URL"
+            ? el("a", { href: safeHref(b.url), target: "_blank", rel: "noopener noreferrer" }, b.url)
+            : label === "Title" ? el("a", { href: "#", onclick: (e) => { e.preventDefault(); openDetail(b.id); } }, fn(b))
+            : el("div", { class: "clamp", title: fn(b) }, fn(b)))),
+        ))),
+      ),
+    ),
+    el("footer", {},
+      el("button", { class: "primary", onclick: () => mergeCluster(cluster, keep, card) }, `Merge ${cluster.ids.length}`),
+      el("button", { title: "Remember that these are different pages", onclick: () => dismissCluster(cluster, card) }, "Not duplicates"),
+      el("button", { class: "link", onclick: () => { skipped.add(cluster.ids.join(",")); card.remove(); } }, "Skip"),
+    ),
+  );
+  return card;
+}
+
+async function unmerge(mergeIds, reopen, remember = true) {
+  try {
+    for (const id of [...mergeIds].reverse()) await api("POST", `/api/merges/${id}/unmerge?remember=${remember}`);
+    toast(mergeIds.length > 1 ? `${mergeIds.length} merges undone` : "Merge undone");
+  } catch (err) {
+    showError(err);
+  }
+  await refresh();
+  if (state.panel === "duplicates") await loadDuplicates();
+  if (reopen) await openDetail(reopen);
+}
+
+async function mergeCluster(cluster, keep, card) {
+  try {
+    const result = await api("POST", "/api/duplicates/merge", { keep, ids: cluster.ids, reason: cluster.pairs[0].rationale });
+    card.remove();
+    toast(`Merged into #${keep}`, { label: "Undo", run: () => unmerge(result.merges, null, false) });
+    await loadMeta();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function dismissCluster(cluster, card) {
+  try {
+    await api("POST", "/api/duplicates/dismiss", { ids: cluster.ids });
+    card.remove();
+    toast("Marked as different pages");
+    await loadMeta();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function mergeAll(groups) {
+  const merged = [];
+  try {
+    for (const c of groups) merged.push(...(await api("POST", "/api/duplicates/merge", { keep: c.suggested, ids: c.ids, reason: c.pairs[0].rationale })).merges);
+    toast(`Merged ${groups.length} groups`, { label: "Undo", run: () => unmerge(merged, null, false) });
+  } catch (err) {
+    showError(err);
+  }
+  await loadDuplicates();
+}
+
 // ------------------------------------------------------------------ import / export
 
 function closeMenus() {
@@ -943,7 +1075,7 @@ for (const a of document.querySelectorAll("[data-panel]")) {
     e.preventDefault();
     showPanel(a.dataset.panel);
     loadMeta();
-    (a.dataset.panel === "runs" ? loadRuns() : loadHealth()).catch(showError);
+    ({ runs: loadRuns, health: loadHealth, duplicates: loadDuplicates })[a.dataset.panel]().catch(showError);
   });
 }
 

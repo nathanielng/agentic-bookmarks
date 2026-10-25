@@ -33,6 +33,9 @@ BACKUP_TABLES = (
     "tags",
     "bookmark_tags",
     "bookmark_events",
+    "merges",
+    "not_duplicates",
+    "duplicate_candidates",
 )
 
 _SELECT_BOOKMARK = "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url FROM bookmarks b"
@@ -56,6 +59,17 @@ class Conflict(ValueError):
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def _join_remarks(first: str | None, second: str | None) -> str | None:
+    """Merge rule: both remarks are kept, separated by a line of dashes; a remark already contained in the
+    other is not repeated."""
+    a, b = (first or "").strip(), (second or "").strip()
+    if not a or b in a:
+        return b if not a else a
+    if a in b:
+        return b
+    return f"{a}\n---\n{b}"
 
 
 def _fts_query(text: str) -> str:
@@ -314,6 +328,7 @@ class Library:
             )
         ]
         row["events"] = [dict(r) for r in self.conn.execute("SELECT * FROM bookmark_events WHERE bookmark_id=? ORDER BY id", (bookmark_id,))]
+        row["merges"] = self.merges(bookmark_id)
         row["job"] = _row(
             self.conn.execute(
                 "SELECT state, attempts, next_run_at, last_error, updated_at FROM processing_jobs WHERE bookmark_id=? AND kind='enrich'",
@@ -673,67 +688,193 @@ class Library:
         self._event(bookmark_id, "resolve", {"from": current["url_canonical"], "to": canonical}, now)
         return bookmark_id
 
-    def merge(self, a_id: int, b_id: int, *, reason: str, now: str) -> int:
+    @staticmethod
+    def pick_survivor(rows: list) -> Any:
+        """PLAN05 §7: the bookmark with the most locked (user-edited) fields, then the earliest saved_at of the
+        best precision, then the lowest id."""
+        best = rows[0]
+        for row in rows[1:]:
+            locks_best, locks_row = len(json.loads(best["locked_fields"])), len(json.loads(row["locked_fields"]))
+            if locks_row != locks_best:
+                if locks_row > locks_best:
+                    best = row
+            elif better_saved_at(best["saved_at"], best["saved_at_source"], row["saved_at"], row["saved_at_source"]):
+                best = row
+            elif not better_saved_at(row["saved_at"], row["saved_at_source"], best["saved_at"], best["saved_at_source"]):
+                best = row if row["id"] < best["id"] else best
+        return best
+
+    def merge(self, a_id: int, b_id: int, *, reason: str, now: str, tier: int | None = 2, keep: int | None = None) -> int:
         """Merge two bookmarks for the same page; returns the survivor's id. Call inside a transaction.
 
-        Survivor: the one with more locked (user-edited) fields, then the earlier, more precise saved_at, then
-        the lower id (PLAN05 §7). Sources and aliases move to the survivor; remarks are concatenated; the more
-        advanced status wins; gaps are filled from the other. The merged one keeps its row (merged_into_id) with
-        a snapshot in its event, so CG5 can un-merge.
+        The survivor is `keep` if given, else `pick_survivor`. Sources, aliases and tags move to the survivor;
+        remarks are concatenated; the more advanced status and a star carry over; gaps are filled from the
+        other. The merged one keeps its row (merged_into_id). A `merges` row holds the snapshot for `unmerge`.
         """
         a, b = (self.conn.execute("SELECT * FROM bookmarks WHERE id=?", (i,)).fetchone() for i in (a_id, b_id))
-        locks_a, locks_b = len(json.loads(a["locked_fields"])), len(json.loads(b["locked_fields"]))
-        if locks_a != locks_b:
-            survivor = a if locks_a > locks_b else b
-        elif better_saved_at(a["saved_at"], a["saved_at_source"], b["saved_at"], b["saved_at_source"]):
-            survivor = b
-        elif better_saved_at(b["saved_at"], b["saved_at_source"], a["saved_at"], a["saved_at_source"]):
-            survivor = a
-        else:
-            survivor = a if a["id"] < b["id"] else b
+        if a is None or b is None:
+            raise NotFound(f"bookmark {a_id if a is None else b_id} not found")
+        survivor = (a if keep == a_id else b) if keep in (a_id, b_id) else self.pick_survivor([a, b])
         loser = b if survivor is a else a
         locked = set(json.loads(survivor["locked_fields"]))
         loser_locked = set(json.loads(loser["locked_fields"]))
-        updates: dict[str, Any] = {"updated_at": now}
+        updates: dict[str, Any] = {}
         if "title" not in locked and ("title" in loser_locked or (not survivor["title"] and loser["title"])):
             updates.update(title=loser["title"], title_source=loser["title_source"])
             if "title" in loser_locked:
                 locked.add("title")
         if "saved_at" not in locked and better_saved_at(survivor["saved_at"], survivor["saved_at_source"], loser["saved_at"], loser["saved_at_source"]):
             updates.update(saved_at=loser["saved_at"], saved_at_source=loser["saved_at_source"])
-        remarks = [r for r in (survivor["remarks"], loser["remarks"]) if r]
-        if len(remarks) == 2 and remarks[0] != remarks[1]:
-            updates["remarks"] = "\n\n".join(remarks)
-        elif remarks:
-            updates["remarks"] = remarks[0]
+        if remarks := _join_remarks(survivor["remarks"], loser["remarks"]):
+            if remarks != survivor["remarks"]:
+                updates["remarks"] = remarks
         if _STATUS_RANK.get(loser["status"], 0) > _STATUS_RANK.get(survivor["status"], 0):
             updates["status"] = loser["status"]
         if loser["starred"] and not survivor["starred"]:
             updates["starred"] = 1
-        for col in ("description", "site_name", "author", "published_at", "image_url", "content_text", "canonical_hint"):
+        for col in ("description", "site_name", "author", "published_at", "image_url", "content_text", "content_simhash", "canonical_hint"):
             if not survivor[col] and loser[col]:
                 updates[col] = loser[col]
-        updates["locked_fields"] = json.dumps(sorted(locked))
-        self._update_columns(survivor["id"], updates)
+        if sorted(locked) != json.loads(survivor["locked_fields"]):
+            updates["locked_fields"] = json.dumps(sorted(locked))
 
         snapshot = {
-            "bookmark": dict(loser),
-            "sources": [r[0] for r in self.conn.execute("SELECT id FROM sources WHERE bookmark_id=?", (loser["id"],))],
-            "aliases": [dict(r) for r in self.conn.execute("SELECT * FROM url_aliases WHERE bookmark_id=?", (loser["id"],))],
+            "version": 2,
+            "survivor": dict(survivor),
+            "loser": dict(loser),
+            "applied": updates,
+            "loser_sources": [r[0] for r in self.conn.execute("SELECT id FROM sources WHERE bookmark_id=?", (loser["id"],))],
+            "loser_aliases": [dict(r) for r in self.conn.execute("SELECT * FROM url_aliases WHERE bookmark_id=?", (loser["id"],))],
+            "survivor_tags": [r[0] for r in self.conn.execute("SELECT tag_id FROM bookmark_tags WHERE bookmark_id=?", (survivor["id"],))],
+            "loser_tags": [dict(r) for r in self.conn.execute("SELECT * FROM bookmark_tags WHERE bookmark_id=?", (loser["id"],))],
+            "loser_job": _row(self.conn.execute("SELECT * FROM processing_jobs WHERE bookmark_id=?", (loser["id"],)).fetchone()),
         }
+        self._update_columns(survivor["id"], {**updates, "updated_at": now})
         self.conn.execute("UPDATE sources SET bookmark_id=? WHERE bookmark_id=?", (survivor["id"], loser["id"]))
-        self.conn.execute("UPDATE url_aliases SET bookmark_id=? WHERE bookmark_id=?", (survivor["id"], loser["id"]))
-        self.conn.execute("UPDATE url_aliases SET kind='merged' WHERE url_canonical=?", (loser["url_canonical"],))
+        self.conn.execute("UPDATE url_aliases SET bookmark_id=?, kind='merged' WHERE bookmark_id=?", (survivor["id"], loser["id"]))
         self.conn.execute(
             "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id, assigned_by) SELECT ?, tag_id, assigned_by FROM bookmark_tags WHERE bookmark_id=?",
             (survivor["id"], loser["id"]),
         )
         self.conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id=?", (loser["id"],))
         self.conn.execute("DELETE FROM processing_jobs WHERE bookmark_id=?", (loser["id"],))
+        self.conn.execute("DELETE FROM duplicate_candidates WHERE a_id IN (?, ?) OR b_id IN (?, ?)", (a_id, b_id, a_id, b_id))
         self.conn.execute("UPDATE bookmarks SET merged_into_id=?, updated_at=? WHERE id=?", (survivor["id"], now, loser["id"]))
-        self._event(survivor["id"], "merge", {"merged": loser["id"], "reason": reason}, now)
-        self._event(loser["id"], "merged_into", {"survivor": survivor["id"], "reason": reason, "snapshot": snapshot}, now)
+        cur = self.conn.execute(
+            "INSERT INTO merges (survivor_id, loser_id, tier, reason, snapshot_json, merged_at, actor) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (survivor["id"], loser["id"], tier, reason, json.dumps(snapshot), now, self.actor),
+        )
+        self._event(survivor["id"], "merge", {"merged": loser["id"], "reason": reason, "merge_id": cur.lastrowid}, now)
+        self._event(loser["id"], "merged_into", {"survivor": survivor["id"], "reason": reason, "merge_id": cur.lastrowid}, now)
         return survivor["id"]
+
+    def merge_bookmarks(self, survivor_id: int, other_ids: list[int], *, reason: str = "merged by hand", tier: int | None = None) -> dict[str, Any]:
+        """Merge others into `survivor_id` (the user's choice). Each pair gets its own merges row."""
+        ids = [i for i in dict.fromkeys(other_ids) if i != survivor_id]
+        if not ids:
+            raise ValueError("choose at least one other bookmark to merge")
+        now = now_utc()
+        merge_ids = []
+        with dbmod.transaction(self.conn):
+            for bid in [survivor_id, *ids]:
+                row = self.conn.execute("SELECT deleted_at, merged_into_id FROM bookmarks WHERE id=?", (bid,)).fetchone()
+                if row is None:
+                    raise NotFound(f"bookmark {bid} not found")
+                if row["merged_into_id"] is not None:
+                    raise Conflict(f"bookmark {bid} was already merged into {row['merged_into_id']}")
+            for bid in ids:
+                self.merge(survivor_id, bid, reason=reason, now=now, tier=tier, keep=survivor_id)
+                merge_ids.append(self.conn.execute("SELECT max(id) FROM merges WHERE loser_id=?", (bid,)).fetchone()[0])
+        return {"survivor": survivor_id, "merges": merge_ids}
+
+    def merges(self, bookmark_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        sql = "SELECT id, survivor_id, loser_id, tier, reason, merged_at, actor, reverted_at FROM merges"
+        args: list[Any] = []
+        if bookmark_id is not None:
+            sql += " WHERE survivor_id=? OR loser_id=?"
+            args = [bookmark_id, bookmark_id]
+        return [dict(r) for r in self.conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit))]
+
+    def unmerge(self, merge_id: int, remember: bool = True) -> dict[str, Any]:
+        """Undo a merge (PLAN03 §7.5): restore the merged-away bookmark from the snapshot, move its sources,
+        aliases, tags and fetch job back, and undo the survivor's merged-in fields unless edited since. The
+        pair is remembered as not duplicates unless `remember` is false (an immediate Undo of a misclick puts
+        the pair back up for review). Returns what was kept on the survivor because it changed later."""
+        m = self.conn.execute("SELECT * FROM merges WHERE id=?", (merge_id,)).fetchone()
+        if m is None:
+            raise NotFound(f"merge {merge_id} not found")
+        if m["reverted_at"]:
+            raise Conflict(f"merge {merge_id} was already undone")
+        survivor_id, loser_id = m["survivor_id"], m["loser_id"]
+        survivor = self.conn.execute("SELECT * FROM bookmarks WHERE id=?", (survivor_id,)).fetchone()
+        if survivor["merged_into_id"] is not None:
+            later = self.conn.execute(
+                "SELECT id FROM merges WHERE loser_id=? AND reverted_at IS NULL ORDER BY id DESC", (survivor_id,)
+            ).fetchone()
+            raise Conflict(f"bookmark {survivor_id} was itself merged later; undo merge {later['id'] if later else '?'} first")
+        snap = json.loads(m["snapshot_json"])
+        if snap.get("legacy"):  # CG3 snapshot: the merged-away row and its source and alias ids only
+            old = snap["loser"] or {}
+            snap = {"loser": old.get("bookmark", {}), "applied": {}, "loser_sources": old.get("sources", []),
+                    "loser_aliases": old.get("aliases", []), "survivor_tags": [], "loser_tags": [], "loser_job": None}  # fmt: skip
+        now = now_utc()
+        kept_edits = []
+        with dbmod.transaction(self.conn):
+            restore = {}
+            for col, merged_value in snap["applied"].items():
+                if survivor[col] == merged_value:
+                    restore[col] = snap["survivor"][col]
+                elif not col.endswith("_source") and col != "locked_fields":
+                    kept_edits.append(col)
+            self._update_columns(survivor_id, {**restore, "updated_at": now})
+            loser_row = {k: v for k, v in snap["loser"].items() if k != "id"}
+            loser_row.update(merged_into_id=None, updated_at=now)
+            self._update_columns(loser_id, loser_row)
+
+            alias_keys = {a["url_canonical"] for a in snap["loser_aliases"]}
+            moved = set(snap["loser_sources"])
+            # Sources seen after the merge under one of the merged-away bookmark's URLs go back with it.
+            for src in self.conn.execute("SELECT id, raw_url FROM sources WHERE bookmark_id=? AND first_seen_at >= ?", (survivor_id, m["merged_at"])):
+                try:
+                    if urls.canonicalize(src["raw_url"]) in alias_keys:
+                        moved.add(src["id"])
+                except ValueError:
+                    pass
+            if moved:
+                marks = ",".join("?" * len(moved))
+                self.conn.execute(f"UPDATE sources SET bookmark_id=? WHERE bookmark_id=? AND id IN ({marks})", (loser_id, survivor_id, *moved))
+            for alias in snap["loser_aliases"]:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO url_aliases (url_canonical, bookmark_id, kind) VALUES (?, ?, ?)",
+                    (alias["url_canonical"], loser_id, alias["kind"]),
+                )
+            if snap["loser_tags"]:
+                keep_tags = set(snap["survivor_tags"])
+                for tag in snap["loser_tags"]:
+                    if tag["tag_id"] not in keep_tags:
+                        self.conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id=? AND tag_id=?", (survivor_id, tag["tag_id"]))
+                    cols = ", ".join(tag)
+                    self.conn.execute(f"INSERT OR IGNORE INTO bookmark_tags ({cols}) VALUES ({', '.join('?' * len(tag))})", tuple(tag.values()))
+            if job := snap["loser_job"]:
+                cols = ", ".join(job)
+                self.conn.execute(f"INSERT OR IGNORE INTO processing_jobs ({cols}) VALUES ({', '.join('?' * len(job))})", tuple(job.values()))
+            self.conn.execute("UPDATE merges SET reverted_at=? WHERE id=?", (now, merge_id))
+            if remember:
+                self.mark_not_duplicates([survivor_id, loser_id], reason="merge undone", now=now)
+            data = {"merge_id": merge_id, "survivor": survivor_id, "restored": loser_id, "kept_edits": kept_edits}
+            self._event(survivor_id, "unmerge", data, now)
+            self._event(loser_id, "unmerge", data, now)
+        return data
+
+    def mark_not_duplicates(self, ids: list[int], *, reason: str = "not duplicates", now: str | None = None) -> int:
+        """Remember every pair among `ids` as different pages, so no scan proposes them again."""
+        now = now or now_utc()
+        ids = sorted(set(ids))
+        pairs = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1 :]]
+        for a, b in pairs:
+            self.conn.execute("INSERT OR IGNORE INTO not_duplicates (a_id, b_id, decided_at, reason) VALUES (?, ?, ?, ?)", (a, b, now, reason))
+            self.conn.execute("DELETE FROM duplicate_candidates WHERE a_id=? AND b_id=?", (a, b))
+        return len(pairs)
 
     def _event(self, bookmark_id: int, kind: str, data: Any, at: str) -> None:
         self.conn.execute(

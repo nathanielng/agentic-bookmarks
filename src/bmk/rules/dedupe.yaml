@@ -1,0 +1,32 @@
+# Duplicate detection (PLAN05 §7, CG5). Tiers 3–4 only ever *propose*; nothing merges without approval.
+
+# Confidence per signal (0–1). "Merge all" in the UI and `bmk dedupe apply` default to >= 0.95.
+confidence:
+  url_variant: 0.95       # tier 3: same url_loose (http/https, www, trailing slash, AMP, index.html, noise params)
+  canonical_hint: 0.9     # tier 4: same-site rel=canonical points at the other bookmark / the same page
+  similar_text: 0.8       # tier 4: page text simhash within max_simhash_distance, titles agreeing
+  same_title: 0.5         # tier 4: same site and same title, nothing else (low confidence only)
+
+max_simhash_distance: 3
+# Extracted text shorter than this is too often a cookie wall or login page to compare.
+min_text_length: 500
+# A title shared by more pages than this on one site is the site's title, not a page's.
+max_title_group: 3
+# Titles shorter than this are never compared.
+min_title_length: 8
+
+# Titles that say nothing about the page (in addition to enrich.yaml generic_titles and the site's own name).
+generic_titles:
+  - home
+  - homepage
+  - linkedin
+  - x
+  - youtube
+  - instagram
+  - facebook
+  - github
+  - medium
+  - notion
+  - google search
+  - untitled
+  - new tab

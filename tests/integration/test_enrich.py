@@ -235,7 +235,7 @@ def test_short_link_resolves_and_merges_with_existing_page(lib, config, web):
     short = lib.get(ids["https://lnkd.in/abc"])
     assert short["merged_into_id"] == survivor_id
     assert len(survivor["sources"]) == 2
-    assert survivor["remarks"] == "read later\n\nfrom a LinkedIn post"
+    assert survivor["remarks"] == "read later\n---\nfrom a LinkedIn post"
     assert {a["url_canonical"]: a["kind"] for a in survivor["aliases"]}["https://lnkd.in/abc"] == "merged"
     assert lib.count("active") == 1
 

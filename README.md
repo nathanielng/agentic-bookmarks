@@ -8,8 +8,9 @@ AI/MCP interface follow in later phases — see [planning/PLAN05.md](planning/PL
 
 ## Status
 
-Code-generation phase **CG4** (file importers and exports) is done. Earlier: CG1 (core, CloudTabs, CLI),
-CG2 (web UI, background scan, `bmk doctor`), CG3 (page fetching). See PLAN05 §16–17.
+Code-generation phase **CG5** (duplicate review) is done. Earlier: CG1 (core, CloudTabs, CLI),
+CG2 (web UI, background scan, `bmk doctor`), CG3 (page fetching), CG4 (file importers, exports).
+See PLAN05 §16–17.
 
 ## Install
 
@@ -60,6 +61,33 @@ bmk export --format markdown --view starred
 - A file that can't be read is reported (and recorded as a failed import run); the other files still import.
 - Web UI: **Import ▾** (Files…, From clipboard) and **Export ▾**, which exports the list on screen with its
   search and device filter.
+
+## Duplicates
+
+The same page saved twice under slightly different addresses is merged automatically only when that is
+certain (tracking parameters, short links that resolve to it). Everything less certain is *proposed* in
+**Duplicates** (sidebar), most confident first:
+
+- **URL variants (95%)**: the same address apart from http/https, `www`, a trailing slash, AMP or index pages.
+  Content parameters such as YouTube's `v=` are never ignored.
+- **Same page (50–90%)**: the page names the other as its canonical address, or its text is nearly identical
+  with matching titles, or (low confidence) the same site and title.
+
+Each group shows the bookmarks side by side with differences highlighted. **Merge** keeps the one you pick
+(suggested: the one you've edited, else the earliest dated) and combines sources, remarks, tags, the star and
+the best date. **Not duplicates** is remembered. A merge can be undone from the toast or from the
+bookmark's details (**Merges → Undo merge**); undoing from the details also remembers the pair as different.
+
+```bash
+bmk dedupe show                           # groups to review (★ = suggested one to keep)
+bmk dedupe merge 12 40                    # keep 12, merge 40 into it
+bmk dedupe dismiss 12 40                  # different pages; never proposed again
+bmk dedupe apply --min-confidence 0.95    # merge every URL-variant group (lists them and asks first)
+bmk dedupe history && bmk dedupe unmerge 7
+bmk dedupe recanonicalise --dry-run       # after editing src/bmk/rules/canonicalize.yaml
+```
+
+Thresholds and ignored titles: `src/bmk/rules/dedupe.yaml`.
 
 ## Page fetching (enrichment)
 
