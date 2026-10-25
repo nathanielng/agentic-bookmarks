@@ -1395,6 +1395,53 @@ function pickColumns(fileName, cols) {
   });
 }
 
+// Manual add: prefills a link from the clipboard; the saved time is when the button was clicked.
+function looksLikeUrl(text) {
+  const t = (text || "").trim();
+  if (!t || /\s/.test(t)) return null;
+  if (/^https?:\/\/[^/]+\./i.test(t)) return t;
+  return /^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(t) ? `https://${t}` : null;
+}
+
+async function addUrl() {
+  const clickedAt = new Date();
+  let clip = "";
+  try { clip = looksLikeUrl(await navigator.clipboard.readText()) || ""; } catch { /* no permission: leave blank */ }
+  const dialog = $("#adder");
+  const url = el("input", { type: "text", value: clip, placeholder: "https://…", size: 60 });
+  const title = el("input", { type: "text", placeholder: "Title (optional)", size: 60 });
+  const remarks = el("textarea", { rows: 3, placeholder: "Remarks (optional)" });
+  const error = el("p", { class: "error" });
+  const submit = async () => {
+    error.textContent = "";
+    try {
+      const r = await api("POST", "/api/bookmarks", {
+        url: url.value.trim(), title: title.value.trim() || null, remarks: remarks.value.trim() || null,
+        saved_at: clickedAt.toISOString(),
+      });
+      dialog.close();
+      if (r.outcome === "new") toast("Added", { label: "Show", run: () => openDetail(r.id) });
+      else if (r.outcome.startsWith("suppressed")) toast("That link is in Trash, so it was not added again");
+      else toast(`Already saved as #${r.id}`, { label: "Show", run: () => openDetail(r.id) });
+      await refresh();
+    } catch (e) { error.textContent = e.message; }
+  };
+  dialog.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.tagName === "INPUT") submit(); });
+  fill(dialog,
+    el("h3", {}, "Add URL"),
+    el("div", { class: "cols" },
+      el("label", {}, "Link (URL)", url), el("label", {}, "Title", title), el("label", {}, "Remarks", remarks)),
+    el("p", { class: "muted" }, `Saved at ${clickedAt.toLocaleString()} (when you clicked Add URL)`),
+    error,
+    el("div", { class: "buttons" },
+      el("button", { onclick: () => dialog.close() }, "Cancel"),
+      el("button", { class: "primary", onclick: submit }, "Add")),
+  );
+  dialog.showModal();
+  (clip ? title : url).focus();
+}
+$("#add-url").addEventListener("click", addUrl);
+
 let searchTimer;
 $("#search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);

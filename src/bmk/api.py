@@ -501,7 +501,7 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
     @app.post("/api/bookmarks")
     def add(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         with library() as lib:
-            outcome, bookmark_id = lib.add(payload.get("url", ""), title=payload.get("title"), remarks=payload.get("remarks"))
+            outcome, bookmark_id = lib.add(payload.get("url", ""), title=payload.get("title"), remarks=payload.get("remarks"), saved_at=payload.get("saved_at"))
         after_ingest()
         return {"outcome": outcome, "id": bookmark_id}
 

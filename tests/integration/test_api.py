@@ -178,3 +178,16 @@ def test_list_and_device_filters_stack(client, cloudtabs):
     meta = client.get("/api/meta", params={"view": "inbox", **phone}).json()
     assert meta["counts"]["inbox"] == 1 and meta["counts"]["kept"] == 1  # lists counted within the phone
     assert {s["source_ref"]: s["bookmarks"] for s in meta["sources"]} == {"Test iPhone": 1, "Test MacBook": 1}  # devices within Inbox
+
+
+def test_manual_add_uses_given_time_and_keeps_existing_remarks(client):
+    body = {"url": "https://example.com/manual", "title": "Manual", "remarks": "first", "saved_at": "2026-10-20T08:30:00Z"}
+    r = client.post("/api/bookmarks", json=body, headers=client.headers_w)
+    assert r.status_code == 200 and r.json()["outcome"] == "new"
+    item = client.get(f"/api/bookmarks/{r.json()['id']}").json()
+    assert item["remarks"] == "first" and item["saved_at"].startswith("2026-10-20T08:30")
+    again = client.post("/api/bookmarks", json={**body, "remarks": "second"}, headers=client.headers_w)
+    assert again.json()["outcome"] != "new" and again.json()["id"] == r.json()["id"]
+    assert client.get(f"/api/bookmarks/{r.json()['id']}").json()["remarks"] == "first"
+    bad = client.post("/api/bookmarks", json={"url": "not a url"}, headers=client.headers_w)
+    assert bad.status_code == 400

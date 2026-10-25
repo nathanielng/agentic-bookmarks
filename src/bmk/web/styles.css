@@ -265,3 +265,8 @@ input.narrow { width: 64px; }
 .cs-status.succeeded { color: var(--ok); }
 .cs-status.succeeded_with_errors { color: var(--warn-fg); }
 .cs-status.cancelled { color: var(--muted); }
+#adder { width: min(520px, 94vw); }
+#adder .cols { flex-direction: column; }
+#adder input, #adder textarea { width: 100%; box-sizing: border-box; font: inherit; }
+#adder .error { color: var(--danger, #c0392b); margin: 4px 0; min-height: 1em; }
+#adder .buttons { display: flex; justify-content: flex-end; gap: 8px; }

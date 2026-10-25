@@ -11,6 +11,7 @@
   <header class="topbar">
     <h1>Bookmarks</h1>
     <input id="search" type="search" placeholder="Search title, URL, remarks…  ( / )" autocomplete="off">
+    <button id="add-url" title="Save a link by hand; fills in a link from the clipboard">Add URL</button>
     <button id="scan" title="Read Safari iCloud Tabs now">Scan iCloud Tabs</button>
     <details class="menu" id="import-menu">
       <summary class="button" title="Import links from files or the clipboard">Import</summary>
@@ -93,6 +94,7 @@
     <aside id="detail" class="detail" hidden></aside>
   </div>
   <dialog id="picker" class="picker"></dialog>
+  <dialog id="adder" class="picker"></dialog>
   <div id="toast" class="toast" hidden></div>
   <script src="/static/app.js"></script>
 </body>

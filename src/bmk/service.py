@@ -297,9 +297,11 @@ class Library:
 
     # ------------------------------------------------------------------ manual add
 
-    def add(self, url: str, title: str | None = None, remarks: str | None = None) -> tuple[str, int | None]:
-        """Add one URL by hand (CLI/API/MCP). Returns (outcome, bookmark_id)."""
-        now = now_utc()
+    def add(
+        self, url: str, title: str | None = None, remarks: str | None = None, saved_at: str | None = None
+    ) -> tuple[str, int | None]:
+        """Add one URL by hand (CLI/API/MCP/UI). Returns (outcome, bookmark_id). saved_at defaults to now."""
+        now = now_utc() if not saved_at else parse_iso(saved_at).isoformat()
         item = RawItem(url=url, title=title, source_ref=self.actor, locator=now, event_at=parse_iso(now), event_at_kind="exact")
         summary = self.ingest("manual", [item], {"actor": self.actor})
         row = self.conn.execute(
@@ -307,7 +309,7 @@ class Library:
         ).fetchone()
         if row["outcome"] in ("invalid", "skipped"):
             raise ValueError(row["error"])
-        if remarks and row["bookmark_id"]:
+        if remarks and row["outcome"] == "new" and row["bookmark_id"]:
             self.update(row["bookmark_id"], remarks=remarks)
         return row["outcome"], row["bookmark_id"]
 
