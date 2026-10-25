@@ -22,6 +22,12 @@ from .timeutil import display, now_utc
 app = typer.Typer(help="Local-first bookmarks manager.", no_args_is_help=True, add_completion=False)
 ingest_app = typer.Typer(help="Import bookmarks from a source.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
+categories_app = typer.Typer(help="Categories: list, add, rename, remove, assign.", invoke_without_command=True)
+app.add_typer(categories_app, name="categories")
+ai_app = typer.Typer(help="Local AI: propose categories, then classify bookmarks (nothing changes until approved).", no_args_is_help=True)
+app.add_typer(ai_app, name="ai")
+changeset_app = typer.Typer(help="Review AI and agent proposals: show, approve, apply, revert.", no_args_is_help=True)
+app.add_typer(changeset_app, name="changeset")
 dedupe_app = typer.Typer(help="Find and review duplicates (merges can be undone).", no_args_is_help=True)
 app.add_typer(dedupe_app, name="dedupe")
 
@@ -606,6 +612,391 @@ def dedupe_recanonicalise(dry_run: Annotated[bool, typer.Option("--dry-run", hel
         console.print(f"#{change['id']}: {escape(change['from'])} → {escape(change['to'])} ({what})", highlight=False)
     prefix = "would change" if dry_run else "changed"
     console.print(f"{prefix}: {result['canonical']} canonical URLs, {result['loose']} loose keys, {result['merged']} merges, {result['aliases']} new aliases")
+
+
+# ------------------------------------------------------------------ categories
+
+
+@categories_app.callback()
+def categories_list(ctx: typer.Context) -> None:
+    """List categories with their bookmark counts."""
+    if ctx.invoked_subcommand:
+        return
+    lib = _lib()
+    table = Table("ID", "Category", "Bookmarks", "Description", "By", box=box.SIMPLE_HEAD, header_style="bold")
+    for c in lib.categories():
+        table.add_row(str(c["id"]), escape(c["name"]), str(c["bookmarks"]), escape(c["description"] or ""), c["created_by"] or "")
+    console.print(table)
+    console.print(f"{lib.uncategorised_count()} bookmarks without a category")
+
+
+@categories_app.command("add")
+def categories_add(name: str, description: Annotated[Optional[str], typer.Option("--description", "-d")] = None) -> None:
+    lib = _lib()
+    try:
+        c = lib.add_category(name, description)
+    except (Conflict, ValueError) as exc:
+        _fail(str(exc))
+    console.print(f"added category {c['id']}: {escape(c['name'])}")
+
+
+@categories_app.command("edit")
+def categories_edit(
+    category_id: int,
+    name: Annotated[Optional[str], typer.Option("--name")] = None,
+    description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
+) -> None:
+    """Rename a category or change its description (the classifier reads the description)."""
+    lib = _lib()
+    try:
+        c = lib.update_category(category_id, name=name, description=description)
+    except (NotFound, Conflict, ValueError) as exc:
+        _fail(str(exc))
+    console.print(f"category {c['id']}: {escape(c['name'])} — {escape(c['description'] or '')}")
+
+
+@categories_app.command("rm")
+def categories_rm(category_id: int) -> None:
+    """Remove a category; its bookmarks become uncategorised."""
+    lib = _lib()
+    try:
+        n = lib.delete_category(category_id)
+    except NotFound as exc:
+        _fail(str(exc))
+    console.print(f"removed category {category_id}; {n} bookmarks are now uncategorised")
+
+
+@categories_app.command("import")
+def categories_import(path: Annotated[Optional[Path], typer.Argument(help="Default: categories.json next to the library.")] = None) -> None:
+    """Add the categories from a categories.json (e.g. saved from another library); existing names are skipped."""
+    lib = _lib()
+    try:
+        added = lib.load_categories_file(path)
+    except (OSError, ValueError) as exc:
+        _fail(str(exc))
+    console.print(f"added {len(added)} categories" + (f": {escape(', '.join(added))}" if added else ""))
+    console.print(f"saved to {lib.config.categories_path}")
+
+
+@categories_app.command("set")
+def categories_set(bookmark_ids: list[int], category: Annotated[str, typer.Option("--category", "-c", help="Name, id, or 'none'.")]) -> None:
+    """Set the category of bookmarks yourself (AI never changes these)."""
+    lib = _lib()
+    if category.lower() == "none":
+        cid = 0
+    elif category.isdigit():
+        cid = int(category)
+    elif found := lib.category_by_name(category):
+        cid = found["id"]
+    else:
+        _fail(f"no category '{category}'")
+    for bid in bookmark_ids:
+        try:
+            lib.update(bid, category_id=cid)
+        except NotFound as exc:
+            _fail(str(exc))
+    console.print(f"set {len(bookmark_ids)} bookmark(s)")
+
+
+# ------------------------------------------------------------------ AI
+
+
+@ai_app.command("status")
+def ai_status() -> None:
+    """Which models and runtimes are ready."""
+    from .ai.models import status
+
+    for row in status(get_config()):
+        mark = "[green]OK  [/green]" if row["ok"] else "[red]MISSING[/red]"
+        console.print(f"{mark} {row['name']}: {escape(row['id'])} · {escape(row['detail'])}", highlight=False, soft_wrap=True)
+
+
+@ai_app.command("download")
+def ai_download(only: Annotated[Optional[str], typer.Option(help="llm or decider (default: both).")] = None, yes: Annotated[bool, typer.Option("--yes", "-y")] = False) -> None:
+    """Download the configured models into the Hugging Face cache."""
+    from .ai.models import download
+
+    cfg = get_config()
+    what = {"llm": cfg.llm_model, "decider": f"{cfg.decider_repo}/{cfg.decider_file}"}
+    names = [what[only]] if only else list(what.values())
+    if not yes:
+        typer.confirm(f"Download {', '.join(names)} from Hugging Face (several GB)?", abort=True)
+    for path in download(cfg, only or "all"):
+        console.print(f"ready: {path}")
+
+
+@ai_app.command("taxonomy")
+def ai_taxonomy(
+    min_categories: Annotated[int, typer.Option("--min")] = 8,
+    max_categories: Annotated[int, typer.Option("--max")] = 15,
+    background: Annotated[bool, typer.Option("--background", "-b", help="Run as a detached job; check it with `bmk ai jobs`.")] = False,
+) -> None:
+    """Propose a category list from a sample of the library (local LLM). Review it with `bmk changeset`."""
+    _ai_job("taxonomy", {"min": min_categories, "max": max_categories}, background)
+
+
+@ai_app.command("categorize")
+def ai_categorize(
+    bookmark_ids: Annotated[Optional[list[int]], typer.Argument(help="Only these bookmarks.")] = None,
+    recheck_ai: Annotated[bool, typer.Option("--recheck-ai", help="Also re-check categories the AI set before.")] = False,
+    limit: Annotated[Optional[int], typer.Option("--limit", "-n")] = None,
+    background: Annotated[bool, typer.Option("--background", "-b", help="Run as a detached job; check it with `bmk ai jobs`.")] = False,
+) -> None:
+    """Classify uncategorised bookmarks with the local decision model into a changeset for review.
+    Ctrl-C pauses; `bmk ai resume <job>` continues."""
+    _ai_job("categorize", {"recheck_ai": recheck_ai, "ids": bookmark_ids, "limit": limit}, background)
+
+
+def _ai_job(kind: str, params: dict, background: bool) -> None:
+    from .ai import jobs
+
+    lib = _lib()
+    try:
+        job_id = jobs.create(lib, kind, params, author="cli")
+    except ValueError as exc:
+        _fail(str(exc))
+    if background:
+        started = jobs.spawn(lib.config)
+        console.print(f"job {job_id} {'started' if started else 'queued (another job is running)'}; check it with `bmk ai jobs`")
+        return
+    job = jobs.claim(lib, job_id)
+    if job is None:
+        console.print(f"job {job_id} queued: another job is running (see `bmk ai jobs`)")
+        return
+
+    def progress(j: dict) -> None:
+        if j["kind"] == "taxonomy":
+            err.print(f"… {j['message']}")
+        elif j["done"] % 25 == 0 or j["done"] == j["total"]:
+            left = j["stats"].get("seconds_left")
+            err.print(f"… {j['done']}/{j['total']} · {j['message']}" + (f" · ~{max(1, round(left / 60))} min left" if left else ""))
+
+    try:
+        job = jobs.execute(lib, lib.config, job, on_progress=progress)
+    except KeyboardInterrupt:
+        job = jobs.get(lib, job_id)
+        console.print(f"job {job_id} {job['state']}" + (f"; continue with `bmk ai resume {job_id}`" if job["state"] == "paused" else ""))
+        raise typer.Exit(130) from None
+    _show_job(job)
+    if job["changeset_id"] and job["state"] in ("succeeded", "succeeded_with_errors"):
+        if kind == "taxonomy":
+            _show_changeset(lib, job["changeset_id"])
+        cs = job["changeset_id"]
+        console.print(f"Review: `bmk changeset show {cs}`, approve (`--all` or `--min-confidence 0.9`), then `bmk changeset apply {cs}`.")
+    jobs.spawn(lib.config)  # anything queued meanwhile
+    if job["state"] == "failed":
+        raise typer.Exit(1)
+
+
+def _timing(job: dict) -> str:
+    """e.g. '22m 30s · 3.0 s/item · 950 tokens/item · 340 tokens/s · Apple M5, 24 GB'."""
+    st = job["stats"]
+    if not st["run_seconds"]:
+        return ""
+    m, s = divmod(round(st["run_seconds"]), 60)
+    parts = [f"{m}m {s:02d}s" if m else f"{s}s"]
+    if "seconds_per_item" in st and job["kind"] == "categorize":
+        parts.append(f"{st['seconds_per_item']} s/item")
+    if "tokens_per_item" in st:
+        parts.append(f"{st['tokens_per_item']} tokens/item")
+    if "tokens_per_second" in st:
+        parts.append(f"{st['tokens_per_second']} tokens/s")
+    if "seconds_left" in st:
+        parts.append(f"~{max(1, round(st['seconds_left'] / 60))} min left")
+    if st["hardware"]:
+        parts.append(st["hardware"])
+    return " · ".join(parts)
+
+
+def _show_job(job: dict) -> None:
+    progress = f"{job['done']}/{job['total']}" if job["total"] else ""
+    errors = f" · {job['errors']} errors" if job["errors"] else ""
+    console.print(f"job {job['id']} · {job['kind']} · [bold]{job['state']}[/bold] {progress}{errors} · {escape(job['message'] or '')}", highlight=False)
+    if timing := _timing(job):
+        console.print(f"[dim]{timing}[/dim]", highlight=False)
+    if job["error"]:
+        console.print(f"[red]{escape(job['error'])}[/red]")
+
+
+@ai_app.command("jobs")
+def ai_jobs(limit: Annotated[int, typer.Option("--limit", "-n")] = 10) -> None:
+    """AI jobs and their state: queued, running, paused, succeeded, succeeded_with_errors, failed, cancelled."""
+    from .ai import jobs
+
+    lib = _lib()
+    table = Table("Job", "Kind", "State", "Progress", "Errors", "Changeset", "Started", "Time", "Message", box=box.SIMPLE_HEAD, header_style="bold")
+    for j in jobs.list_(lib, limit):
+        table.add_row(str(j["id"]), j["kind"], j["state"], f"{j['done']}/{j['total']}" if j["total"] else "", str(j["errors"] or ""),
+                      str(j["changeset_id"] or ""), display(j["started_at"], "exact", lib.config.display_tz, short=True) if j["started_at"] else "",
+                      _timing(j), escape(j["error"] if j["state"] == "failed" else j["message"] or ""))  # fmt: skip
+    console.print(table)
+
+
+def _job_control(job_id: int, action: str) -> None:
+    from .ai import jobs
+
+    lib = _lib()
+    try:
+        job = jobs.control(lib, job_id, action)
+    except (NotFound, Conflict, ValueError) as exc:
+        _fail(str(exc))
+    if action == "resume":
+        jobs.spawn(lib.config)
+        job = jobs.get(lib, job_id)
+    _show_job(job)
+
+
+@ai_app.command("pause")
+def ai_pause(job_id: int) -> None:
+    """Pause a classification job after the current bookmark."""
+    _job_control(job_id, "pause")
+
+
+@ai_app.command("resume")
+def ai_resume(job_id: int) -> None:
+    """Continue a paused job in the background."""
+    _job_control(job_id, "resume")
+
+
+@ai_app.command("cancel")
+def ai_cancel(job_id: int) -> None:
+    """Stop a job; what it proposed so far still goes to review."""
+    _job_control(job_id, "cancel")
+
+
+@ai_app.command("run-jobs", hidden=True)
+def ai_run_jobs() -> None:
+    """Run queued jobs one after another (started detached by the web UI and --background)."""
+    import signal
+
+    from .ai import jobs
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)  # cancel (category list) or shutdown: end the job cleanly
+    lib = _lib()
+    try:
+        for job in jobs.run_queued(lib, lib.config):
+            print(f"job {job['id']} {job['kind']}: {job['state']} · {job['message'] or ''} {job['error'] or ''}", flush=True)
+    except KeyboardInterrupt:
+        pass
+
+
+# ------------------------------------------------------------------ changesets
+
+
+def _show_changeset(lib, cs_id: int) -> None:
+    from . import changesets
+
+    cs = changesets.get(lib, cs_id)
+    console.print(f"[bold]changeset {cs['id']}[/bold] · {cs['kind']} · {cs['status']} · {cs['model'] or ''} · {escape(cs['summary'] or '')}", highlight=False)
+    if cs["error"]:
+        console.print(f"[red]{escape(cs['error'])}[/red]")
+    table = Table("Item", "Decision", "Conf.", "Bookmark", "Change", "Why", box=box.SIMPLE_HEAD, header_style="bold")
+    for i in cs["items"]:
+        if i["op"] == "add_category":
+            change = f"+ {i['new_value']['name']}: {i['new_value'].get('description', '')}"
+            target = ""
+        elif i["op"] == "set_category":
+            change = f"{i['old_name'] or '—'} → {i['new_name'] or '—'}"
+            target = f"#{i['bookmark_id']} {(i['title'] or i['url'] or '')[:50]}"
+        else:
+            change = f"merge into #{i['target_id']}"
+            target = f"#{i['bookmark_id']}"
+        conf = f"{i['confidence']:.0%}" if i["confidence"] is not None else ""
+        table.add_row(str(i["id"]), i["decision"], conf, escape(target), escape(change), escape(i["rationale"] or i["result"] or ""))
+    console.print(table)
+
+
+@changeset_app.command("list")
+def changeset_list(status: Annotated[Optional[str], typer.Option()] = None) -> None:
+    from . import changesets
+
+    lib = _lib()
+    table = Table("ID", "Kind", "Status", "Items", "Created", "Summary", box=box.SIMPLE_HEAD, header_style="bold")
+    for cs in changesets.list_(lib, status):
+        items = " ".join(f"{k}={v}" for k, v in sorted(cs["counts"].items()))
+        table.add_row(str(cs["id"]), cs["kind"], cs["status"], items, display(cs["created_at"], "exact", lib.config.display_tz), escape(cs["summary"] or ""))
+    console.print(table)
+
+
+@changeset_app.command("show")
+def changeset_show(changeset_id: int) -> None:
+    from .service import NotFound as _NF
+
+    try:
+        _show_changeset(_lib(), changeset_id)
+    except _NF as exc:
+        _fail(str(exc))
+
+
+def _decide(changeset_id: int, decision: str, items: list[int] | None, min_confidence: float | None, all_items: bool) -> None:
+    from . import changesets
+
+    if not items and min_confidence is None and not all_items:
+        _fail("give item ids, --min-confidence or --all")
+    lib = _lib()
+    try:
+        n = changesets.decide(lib, changeset_id, decision, items or None, min_confidence)
+    except (NotFound, Conflict, ValueError) as exc:
+        _fail(str(exc))
+    console.print(f"{decision} {n} item(s)")
+
+
+@changeset_app.command("approve")
+def changeset_approve(
+    changeset_id: int,
+    items: Annotated[Optional[list[int]], typer.Argument(help="Item ids (default: see --all / --min-confidence).")] = None,
+    min_confidence: Annotated[Optional[float], typer.Option("--min-confidence")] = None,
+    all_items: Annotated[bool, typer.Option("--all")] = False,
+) -> None:
+    """Approve items (they are applied by `bmk changeset apply`)."""
+    _decide(changeset_id, "approved", items, min_confidence, all_items)
+
+
+@changeset_app.command("reject")
+def changeset_reject(
+    changeset_id: int,
+    items: Annotated[Optional[list[int]], typer.Argument()] = None,
+    all_items: Annotated[bool, typer.Option("--all")] = False,
+) -> None:
+    _decide(changeset_id, "rejected", items, None, all_items)
+
+
+@changeset_app.command("apply")
+def changeset_apply(changeset_id: int) -> None:
+    """Apply the approved items in one transaction; items that changed since become conflicts."""
+    from . import changesets
+
+    lib = _lib()
+    try:
+        r = changesets.apply(lib, changeset_id)
+    except (NotFound, Conflict) as exc:
+        _fail(str(exc))
+    console.print(f"applied {r['applied']}, conflicts {r['conflicts']}, still to decide {r['left']}")
+
+
+@changeset_app.command("revert")
+def changeset_revert(changeset_id: int) -> None:
+    """Undo an applied changeset (items changed since are left alone)."""
+    from . import changesets
+
+    lib = _lib()
+    try:
+        r = changesets.revert(lib, changeset_id)
+    except (NotFound, Conflict) as exc:
+        _fail(str(exc))
+    console.print(f"reverted {r['reverted']}, skipped {r['skipped']} (changed since)")
+
+
+@app.command()
+def mcp() -> None:
+    """Run the MCP server on stdio (for Claude Code / Claude Desktop). Read and propose tools are always on;
+    single-item writes need BMK_MCP_ALLOW_WRITES=true."""
+    from .mcp_server import main
+
+    main()
 
 
 @app.command("import-backup")

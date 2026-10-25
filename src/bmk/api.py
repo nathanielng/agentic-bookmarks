@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__, dedupe, doctor, launchd
+from . import __version__, changesets, dedupe, doctor, launchd
 from . import export as exporter
 from . import db as dbmod
 from .config import Config, get_config
@@ -130,6 +130,10 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
                 "enrich": Worker is not None,
                 "worker_running": bool(worker and worker.running),
                 "duplicates": dedupe.cluster_count(lib),
+                "categories": lib.categories(view),
+                "uncategorised": lib.uncategorised_count(view),
+                "pending_changesets": lib.conn.execute("SELECT COUNT(*) FROM changesets WHERE status IN ('pending', 'partial')").fetchone()[0],
+                "ai_jobs_active": lib.conn.execute("SELECT COUNT(*) FROM ai_jobs WHERE state IN ('queued', 'running')").fetchone()[0],
             }
 
     @app.get("/api/bookmarks")
@@ -139,6 +143,7 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
         status: str | None = None,
         source_type: str | None = None,
         source_ref: str | None = None,
+        category: str | None = None,
         sort: str = "saved_at",
         desc: bool = True,
         limit: int = 100,
@@ -147,7 +152,7 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
         with library() as lib:
             return lib.browse(
                 view=view, q=q, status=status, source_type=source_type, source_ref=source_ref,
-                sort=sort, desc=desc, limit=min(max(limit, 1), 500), offset=max(offset, 0),
+                category=category if category in (None, "none") else int(category), sort=sort, desc=desc, limit=min(max(limit, 1), 500), offset=max(offset, 0),
             )
 
     @app.get("/api/bookmarks/{bookmark_id}")
@@ -225,8 +230,10 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
                     lib.update(bookmark_id, starred=bool(payload.get("starred", True)))
                 elif action == "refetch":
                     lib.refetch([bookmark_id])
+                elif action == "category":
+                    lib.update(bookmark_id, category_id=payload.get("category_id") or 0)
                 else:
-                    raise ValueError("action must be delete, restore, status, star or refetch")
+                    raise ValueError("action must be delete, restore, status, star, category or refetch")
         if action == "refetch":
             kick()
         return {"ok": True, "count": len(ids)}
@@ -371,6 +378,114 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
         if result.status == "imported":
             after_ingest()
         return JSONResponse({**result.as_dict(), "detail": result.error}, status_code=200 if result.status == "imported" else 422)
+
+    # ------------------------------------------------------------------ categories
+
+    @app.get("/api/categories")
+    def categories(view: str = "active") -> dict[str, Any]:
+        with library() as lib:
+            return {"categories": lib.categories(view), "uncategorised": lib.uncategorised_count(view)}
+
+    @app.post("/api/categories")
+    def category_add(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        with library() as lib:
+            return lib.add_category(payload.get("name", ""), payload.get("description"))
+
+    @app.patch("/api/categories/{category_id}")
+    def category_edit(category_id: int, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        with library() as lib:
+            return lib.update_category(category_id, payload.get("name"), payload.get("description"), payload.get("position"))
+
+    @app.delete("/api/categories/{category_id}")
+    def category_delete(category_id: int) -> dict[str, Any]:
+        with library() as lib:
+            return {"uncategorised": lib.delete_category(category_id)}
+
+    # ------------------------------------------------------------------ AI proposals (changesets)
+
+    @app.get("/api/changesets")
+    def changeset_list(status: str | None = None) -> dict[str, Any]:
+        with library() as lib:
+            return {"changesets": changesets.list_(lib, status)}
+
+    @app.get("/api/changesets/{changeset_id}")
+    def changeset_get(changeset_id: int) -> dict[str, Any]:
+        with library() as lib:
+            return changesets.get(lib, changeset_id)
+
+    @app.post("/api/changesets/{changeset_id}/decide")
+    def changeset_decide(changeset_id: int, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """{decision: approved|rejected|pending, item_ids?: [...], min_confidence?: 0.8, new_values?: {item_id: value}}"""
+        decision = payload.get("decision")
+        if decision not in ("approved", "rejected", "pending"):
+            raise HTTPException(400, "decision must be approved, rejected or pending")
+        ids = payload.get("item_ids")
+        new_values = {int(k): v for k, v in (payload.get("new_values") or {}).items()}
+        with library() as lib:
+            count = changesets.decide(lib, changeset_id, decision, [int(i) for i in ids] if ids is not None else None,
+                                      payload.get("min_confidence"), new_values)  # fmt: skip
+            return {"changed": count, "changeset": changesets.get(lib, changeset_id)}
+
+    @app.post("/api/changesets/{changeset_id}/apply")
+    def changeset_apply(changeset_id: int) -> dict[str, Any]:
+        with library() as lib:
+            return changesets.apply(lib, changeset_id)
+
+    @app.post("/api/changesets/{changeset_id}/revert")
+    def changeset_revert(changeset_id: int) -> dict[str, Any]:
+        with library() as lib:
+            return changesets.revert(lib, changeset_id)
+
+    @app.get("/api/ai/status")
+    def ai_status() -> dict[str, Any]:
+        from .ai import models
+
+        return {"parts": models.status(config)}
+
+    @app.get("/api/ai/jobs")
+    def ai_jobs(limit: int = 20) -> dict[str, Any]:
+        from .ai import jobs
+
+        with library() as lib:
+            return {"jobs": jobs.list_(lib, limit), "rate": jobs.rate(lib, "categorize")}
+
+    @app.post("/api/ai/jobs")
+    def ai_job_start(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """{kind: taxonomy|categorize, params?: {...}}: queue a job; a detached runner (`bmk ai run-jobs`) runs it,
+        so it carries on if the server stops. Check it with GET /api/ai/jobs/{id}."""
+        from .ai import jobs
+
+        kind = payload.get("kind")
+        params = payload.get("params") or {}
+        if kind == "taxonomy":
+            params = {"min": int(params.get("min", 8)), "max": int(params.get("max", 15))}
+        elif kind == "categorize":
+            params = {"recheck_ai": bool(params.get("recheck_ai"))}
+        with library() as lib:
+            job_id = jobs.create(lib, kind, params, author="web")
+        jobs.spawn(config)
+        with library() as lib:
+            return jobs.get(lib, job_id)
+
+    @app.get("/api/ai/jobs/{job_id}")
+    def ai_job(job_id: int) -> dict[str, Any]:
+        from .ai import jobs
+
+        with library() as lib:
+            return jobs.get(lib, job_id)
+
+    @app.post("/api/ai/jobs/{job_id}/{action}")
+    def ai_job_control(job_id: int, action: str) -> dict[str, Any]:
+        """pause | resume | cancel"""
+        from .ai import jobs
+
+        with library() as lib:
+            job = jobs.control(lib, job_id, action)
+        if action == "resume":
+            jobs.spawn(config)
+            with library() as lib:
+                job = jobs.get(lib, job_id)
+        return job
 
     @app.post("/api/bookmarks")
     def add(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:

@@ -24,3 +24,6 @@ claude_resume.sh
 
 # Planning history: only the original brief (PLAN00) and the consolidated plan (PLAN05 onwards) are committed
 planning/PLAN0[1-4]*.md
+
+# personal category list (bmk categories); lives next to the library
+categories.json

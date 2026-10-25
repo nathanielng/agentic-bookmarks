@@ -20,6 +20,8 @@ const state = {
   view: "inbox",
   q: "",
   source: null, // {source_type, source_ref}
+  category: null, // a category id, "none" (uncategorised) or null (all)
+  categories: [],
   sort: "saved_at",
   desc: true,
   offset: 0,
@@ -151,6 +153,23 @@ async function loadMeta() {
       ),
     ),
   );
+  state.categories = meta.categories;
+  const catLink = (value, label, count, title) => el("li", {},
+    el("a", {
+      href: "#",
+      class: state.category === value ? "active" : "",
+      title: state.category === value ? "Click again to show every category" : title,
+      onclick: (e) => { e.preventDefault(); selectCategory(value); },
+    }, label, el("span", { class: "count" }, count)),
+  );
+  fill($("#categories"),
+    ...meta.categories.map((c) => catLink(c.id, c.name, c.bookmarks || "", c.description || `Only ${c.name}`)),
+    meta.categories.length ? catLink("none", "Uncategorised", meta.uncategorised || "", "Bookmarks without a category")
+      : el("li", {}, el("a", { href: "#", class: "muted", onclick: (e) => { e.preventDefault(); openPanel("categories"); } }, "Set up categories…")),
+  );
+  fill($("#bulk-category"), el("option", { value: "" }, "Category…"), el("option", { value: "0" }, "— none —"),
+    ...meta.categories.map((c) => el("option", { value: c.id }, c.name)));
+  $("#review-count").textContent = meta.pending_changesets || "";
   const sources = $("#sources");
   sources.replaceChildren(
     ...meta.sources.map((s) => {
@@ -174,7 +193,7 @@ async function loadMeta() {
 
 function showPanel(panel) {
   state.panel = panel;
-  for (const p of ["bookmarks", "duplicates", "runs", "health"]) $(`#panel-${p}`).hidden = p !== panel;
+  for (const p of ["bookmarks", "categories", "review", "duplicates", "runs", "health"]) $(`#panel-${p}`).hidden = p !== panel;
   if (panel !== "bookmarks") closeDetail();
 }
 
@@ -194,6 +213,13 @@ function selectSource(source) {
   refresh();
 }
 
+function selectCategory(category) {
+  Object.assign(state, { category: state.category === category ? null : category, offset: 0 });
+  state.selected.clear();
+  showPanel("bookmarks");
+  refresh();
+}
+
 // ------------------------------------------------------------------ table
 
 async function loadBookmarks() {
@@ -201,6 +227,7 @@ async function loadBookmarks() {
     view: state.view, sort: state.sort, desc: state.desc, limit: state.limit, offset: state.offset,
   });
   if (state.q) params.set("q", state.q);
+  if (state.category !== null) params.set("category", state.category);
   if (state.source) {
     params.set("source_type", state.source.source_type);
     if (state.source.source_ref) params.set("source_ref", state.source.source_ref);
@@ -317,7 +344,7 @@ function renderRows() {
   const tbody = $("#rows");
   if (!state.items.length) {
     const empty = state.q ? "No matches." : state.view === "inbox" ? "Inbox is empty. Everything has been kept or trashed." : "Nothing here yet.";
-    tbody.replaceChildren(el("tr", {}, el("td", { colspan: 7, class: "empty" }, empty)));
+    tbody.replaceChildren(el("tr", {}, el("td", { colspan: 8, class: "empty" }, empty)));
   } else {
     tbody.replaceChildren(...state.items.map((item) => {
       const href = safeHref(item.url);
@@ -345,6 +372,7 @@ function renderRows() {
         editableCell(item, "title", title, open, fetchMark(item),
           item.description ? el("div", { class: "desc", title: item.description }, item.description) : null),
         el("td", { class: "domain" }, item.domain || ""),
+        el("td", { class: "category" }, categoryBadge(item)),
         el("td", { class: "sources" }, ...item.source_labels.map((s) => el("span", { class: "badge", title: s }, sourceLabel(s)))),
         editableCell(item, "remarks", item.remarks || ""),
         el("td", { class: "actions" }, ...actionButtons(item)),
@@ -573,6 +601,9 @@ async function openDetail(id) {
       el("div", { class: "inline" }, dateInput,
         el("button", { onclick: () => dateInput.value && save({ saved_at: new Date(dateInput.value).toISOString() }) }, "Set")),
     ),
+    b.deleted_at ? null : row("Category",
+      categorySelect(b.category_id, (value) => save({ category_id: value || 0 })),
+      b.category_assigned_by ? el("span", { class: "muted" }, b.category_assigned_by === "ai" ? " set by AI" : " set by you") : null),
     row("Fetch", fetchInfo(b)),
     row("Locked", b.locked_fields.length ? b.locked_fields.join(", ") : "—"),
     row("Remarks", remarks, el("button", { onclick: () => save({ remarks: remarks.value }) }, "Save remarks")),
@@ -916,6 +947,280 @@ async function mergeAll(groups) {
   await loadDuplicates();
 }
 
+// ------------------------------------------------------------------ categories
+
+function categoryBadge(item) {
+  if (!item.category) return null;
+  const ai = item.category_assigned_by === "ai";
+  return el("span", { class: `badge cat${ai ? " ai" : ""}`, title: ai ? "Set by AI (approved by you)" : "Set by you" }, item.category);
+}
+
+function categorySelect(current, onchange) {
+  const select = el("select", { "aria-label": "Category", onchange: () => onchange(Number(select.value) || null) },
+    el("option", { value: "" }, "— none —"),
+    ...state.categories.map((c) => el("option", { value: c.id, selected: c.id === current }, c.name)));
+  return select;
+}
+
+function openPanel(panel) {
+  showPanel(panel);
+  loadMeta();
+  ({ runs: loadRuns, health: loadHealth, duplicates: loadDuplicates, categories: loadCategories, review: loadReview })[panel]().catch(showError);
+}
+
+async function loadCategories() {
+  const panel = $("#panel-categories");
+  const [{ categories, uncategorised }, ai, { jobs, rate }] = await Promise.all([
+    api("GET", "/api/categories"), api("GET", "/api/ai/status"), api("GET", "/api/ai/jobs?limit=5"),
+  ]);
+  const ready = ai.parts.every((p) => p.ok);
+  const busy = jobs.some((j) => ["queued", "running"].includes(j.state));
+  const name = el("input", { placeholder: "New category", "aria-label": "Name" });
+  const desc = el("input", { placeholder: "What belongs in it (one sentence; the AI reads this)", "aria-label": "Description", class: "wide" });
+  const add = async () => {
+    try {
+      await api("POST", "/api/categories", { name: name.value, description: desc.value });
+      await loadCategories();
+      await loadMeta();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  fill(panel,
+    el("div", { class: "dup-head" },
+      el("h2", {}, "Categories"),
+      el("p", { class: "muted" },
+        "Each bookmark has at most one category. The AI suggests a list from a sample of your library, then sorts ",
+        "bookmarks into it; every suggestion waits in AI review until you approve it. Categories you set yourself are never changed."),
+      el("div", { class: "inline" },
+        el("button", { disabled: !ready, title: "The local LLM reads a sample of titles and proposes 8–15 categories",
+          onclick: () => startAI("taxonomy") }, categories.length ? "Suggest more categories with AI" : "Suggest categories with AI"),
+        el("button", { disabled: !ready || !categories.length, title: "The local decision model picks a category for each uncategorised bookmark",
+          onclick: () => startAI("categorize") }, `Categorise ${uncategorised} uncategorised with AI`),
+        rate && uncategorised ? el("span", { class: "muted", title: `From job ${rate.job}: ${rate.seconds_per_item} s per bookmark${rate.tokens_per_item ? `, ${rate.tokens_per_item} input tokens each` : ""}` },
+          `≈ ${duration(uncategorised * rate.seconds_per_item)} on ${rate.hardware}`) : null,
+        busy ? el("span", { class: "muted" }, "An AI job is running; new ones wait in the queue. See AI review.") : null,
+      ),
+      ready ? null : el("details", { class: "warn" }, el("summary", {}, "The local AI isn't fully set up"),
+        el("ul", {}, ...ai.parts.filter((p) => !p.ok).map((p) => el("li", {}, `${p.name}: ${p.detail}`)))),
+    ),
+    el("table", { class: "mini cats" },
+      el("thead", {}, el("tr", {}, el("th", {}, "Name"), el("th", {}, "Description"), el("th", {}, "Bookmarks"), el("th", {}, ""))),
+      el("tbody", {}, ...categories.map(categoryRow),
+        el("tr", {}, el("td", {}, name), el("td", {}, desc), el("td", {}, ""), el("td", {}, el("button", { onclick: add }, "Add")))),
+    ),
+  );
+}
+
+function categoryRow(c) {
+  const name = el("input", { value: c.name, "aria-label": "Name" });
+  const desc = el("input", { value: c.description || "", class: "wide", "aria-label": "Description" });
+  const save = async () => {
+    if (name.value === c.name && desc.value === (c.description || "")) return;
+    try {
+      await api("PATCH", `/api/categories/${c.id}`, { name: name.value, description: desc.value });
+      toast("Saved");
+      await loadMeta();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  name.addEventListener("change", save);
+  desc.addEventListener("change", save);
+  const remove = async () => {
+    if (c.bookmarks && !window.confirm(`Remove “${c.name}”? Its ${c.bookmarks} bookmarks become uncategorised.`)) return;
+    try {
+      await api("DELETE", `/api/categories/${c.id}`);
+      await loadCategories();
+      await loadMeta();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  return el("tr", {}, el("td", {}, name), el("td", {}, desc),
+    el("td", {}, el("a", { href: "#", onclick: (e) => { e.preventDefault(); state.category = null; selectCategory(c.id); } }, c.bookmarks || 0)),
+    el("td", {}, el("button", { class: "link danger", onclick: remove }, "Remove")));
+}
+
+async function startAI(kind) {
+  try {
+    const job = await api("POST", "/api/ai/jobs", { kind });
+    toast(`Job ${job.id} ${job.state}: ${kind === "taxonomy" ? "suggesting categories (a few minutes)" : "categorising (a few seconds per bookmark)"}. It runs on even if you close this page.`);
+    state.reviewId = null;
+    openPanel("review");
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// ------------------------------------------------------------------ AI review (changesets)
+
+const CS_KINDS = { taxonomy: "Category list", categorize: "Categorisation", agent: "Agent proposal" };
+const DECISION_LABELS = { pending: "To review", approved: "Approved", rejected: "Rejected", conflict: "Conflict", applied: "Applied", reverted: "Reverted" };
+let reviewTimer;
+
+function duration(seconds) {
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
+function jobTiming(job) {
+  const st = job.stats;
+  if (!st.run_seconds) return null;
+  const parts = [duration(st.run_seconds)];
+  if (job.kind === "categorize" && st.seconds_per_item) parts.push(`${st.seconds_per_item} s per bookmark`);
+  if (st.tokens_per_item) parts.push(`${st.tokens_per_item} input tokens each`);
+  if (st.tokens_per_second) parts.push(`${st.tokens_per_second} tokens/s`);
+  if (st.seconds_left) parts.push(`about ${duration(st.seconds_left)} left`);
+  if (st.hardware) parts.push(st.hardware);
+  return el("div", { class: "muted" }, parts.join(" · "));
+}
+
+const JOB_STATES = {
+  queued: "Queued", running: "Running", paused: "Paused", succeeded: "Succeeded",
+  succeeded_with_errors: "Succeeded with errors", failed: "Failed", cancelled: "Cancelled",
+};
+
+function jobCard(job) {
+  const control = async (action) => {
+    try {
+      await api("POST", `/api/ai/jobs/${job.id}/${action}`);
+      await loadReview();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  const pct = job.total ? Math.round((100 * job.done) / job.total) : null;
+  const live = ["queued", "running", "paused"].includes(job.state);
+  return el("div", { class: `job ${job.state}` },
+    el("div", { class: "job-head" },
+      el("strong", {}, `Job ${job.id} · ${job.kind === "taxonomy" ? "Suggest categories" : "Categorise"}`),
+      el("span", { class: `cs-status ${job.state}` }, JOB_STATES[job.state] || job.state),
+      job.total ? el("span", { class: "muted" }, `${job.done}/${job.total}`) : null,
+      job.errors ? el("span", { class: "danger", title: job.error || "" }, `${job.errors} errors`) : null,
+      job.started_at ? el("span", { class: "muted" }, fmtDate(job.started_at)) : null,
+      el("span", { class: "spacer" }),
+      job.state === "running" && job.kind === "categorize" ? el("button", { onclick: () => control("pause") }, "Pause") : null,
+      job.state === "paused" ? el("button", { class: "primary", onclick: () => control("resume") }, "Resume") : null,
+      live ? el("button", { class: "danger", title: "Stop; what it proposed so far still goes to review", onclick: () => control("cancel") }, "Cancel") : null,
+      job.changeset_id ? el("button", { class: "link", onclick: () => { state.reviewId = job.changeset_id; loadReview().catch(showError); } }, `Proposal #${job.changeset_id}`) : null,
+    ),
+    pct !== null && live ? el("progress", { max: 100, value: pct }) : null,
+    jobTiming(job),
+    el("div", { class: "muted" }, job.state === "failed" ? job.error || "" : job.message || ""),
+  );
+}
+
+async function loadReview() {
+  clearTimeout(reviewTimer);
+  const panel = $("#panel-review");
+  const [{ changesets }, { jobs }] = await Promise.all([api("GET", "/api/changesets"), api("GET", "/api/ai/jobs?limit=5")]);
+  if (state.reviewId === undefined || state.reviewId === null) {
+    const open = changesets.find((c) => ["running", "pending", "partial"].includes(c.status));
+    state.reviewId = open ? open.id : changesets[0]?.id ?? null;
+  }
+  const list = el("ul", { class: "cs-list" }, ...changesets.map((c) => el("li", {},
+    el("a", { href: "#", class: c.id === state.reviewId ? "active" : "", onclick: (e) => { e.preventDefault(); state.reviewId = c.id; loadReview().catch(showError); } },
+      el("strong", {}, `#${c.id} ${CS_KINDS[c.kind] || c.kind}`), el("span", { class: `cs-status ${c.status}` }, c.status),
+      el("div", { class: "muted" }, `${fmtDate(c.created_at)} · ${c.author}`)),
+  )));
+  const detail = state.reviewId ? await changesetView(state.reviewId) : el("p", { class: "empty" }, "No proposals yet. Ask the AI for categories under Manage categories.");
+  fill(panel,
+    el("div", { class: "dup-head" }, el("h2", {}, "AI review"),
+      el("p", { class: "muted" }, "Nothing here changes your library until you approve items and press Apply. An applied proposal can be reverted.")),
+    jobs.length ? el("section", { class: "jobs" }, el("h3", {}, "AI jobs"), ...jobs.map(jobCard)) : null,
+    el("div", { class: "review" }, list, detail),
+  );
+  if (jobs.some((j) => ["queued", "running"].includes(j.state))) reviewTimer = setTimeout(() => { if (state.panel === "review") loadReview().catch(() => {}); }, 4000);
+  else loadMeta();
+}
+
+async function changesetView(id) {
+  const cs = await api("GET", `/api/changesets/${id}`);
+  const open = ["pending", "partial"].includes(cs.status);
+  const decide = async (decision, extra) => {
+    try {
+      await api("POST", `/api/changesets/${id}/decide`, { decision, ...extra });
+      await loadReview();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  const run = async (action) => {
+    try {
+      const r = await api("POST", `/api/changesets/${id}/${action}`);
+      toast(action === "apply" ? `Applied ${r.applied}${r.conflicts ? `; ${r.conflicts} conflicts` : ""}` : `Reverted ${r.reverted}${r.skipped ? `; ${r.skipped} changed since, left alone` : ""}`);
+      await refresh();
+      await loadReview();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  const threshold = el("input", { type: "number", min: 0, max: 100, step: 5, value: 90, class: "narrow", "aria-label": "Minimum confidence (%)" });
+  const hasConfidence = cs.items.some((i) => i.confidence !== null);
+  const approved = cs.counts.approved || 0;
+  return el("div", { class: "cs-detail" },
+    el("h3", {}, `#${cs.id} ${CS_KINDS[cs.kind] || cs.kind} · ${cs.status}`),
+    el("p", {}, cs.summary || "", cs.model ? el("span", { class: "muted" }, ` · ${cs.model}`) : null),
+    cs.error ? el("p", { class: "warn" }, cs.error) : null,
+    cs.status === "running" ? el("p", { class: "muted" }, "Running… this page refreshes by itself.") : null,
+    el("p", { class: "muted" }, Object.entries(cs.counts).map(([k, v]) => `${v} ${(DECISION_LABELS[k] || k).toLowerCase()}`).join(" · ")),
+    open ? el("div", { class: "inline cs-actions" },
+      hasConfidence ? el("span", {}, "Approve items at ", threshold, "% or more ",
+        el("button", { onclick: () => decide("approved", { min_confidence: Number(threshold.value) / 100 }) }, "Approve")) : null,
+      el("button", { onclick: () => decide("approved") }, "Approve all"),
+      el("button", { onclick: () => decide("rejected") }, "Reject all"),
+      el("button", { class: "primary", disabled: !approved, onclick: () => run("apply") }, `Apply ${approved} approved`),
+    ) : null,
+    ["applied", "partial"].includes(cs.status) ? el("button", { onclick: () => run("revert") }, "Revert this proposal") : null,
+    el("table", { class: "mini cs-items" },
+      el("thead", {}, el("tr", {}, el("th", {}, ""), el("th", {}, cs.kind === "taxonomy" ? "Category" : "Bookmark"),
+        el("th", {}, "Change"), el("th", {}, "Confidence"), el("th", {}, "Why"), el("th", {}, ""))),
+      el("tbody", {}, ...cs.items.map((i) => itemRow(cs, i, open, decide))),
+    ),
+  );
+}
+
+function itemRow(cs, item, open, decide) {
+  const editable = open && !["applied", "reverted"].includes(item.decision);
+  let subject, change;
+  if (item.op === "add_category") {
+    subject = el("strong", {}, item.new_value.name);
+    change = el("span", {}, item.new_value.description || "");
+    if (editable) {
+      const name = el("input", { value: item.new_value.name, "aria-label": "Name" });
+      const desc = el("input", { value: item.new_value.description || "", class: "wide", "aria-label": "Description" });
+      const keep = () => decide(item.decision, { item_ids: [item.id], new_values: { [item.id]: { name: name.value, description: desc.value } } });
+      name.addEventListener("change", keep);
+      desc.addEventListener("change", keep);
+      subject = name;
+      change = desc;
+    }
+  } else if (item.op === "set_category") {
+    subject = el("a", { href: "#", title: item.url, onclick: (e) => { e.preventDefault(); openBookmarkFromPanel(item.bookmark_id); } },
+      item.title || fallbackTitle(item.url || ""));
+    change = editable
+      ? el("span", {}, `${item.old_name || "—"} → `, categorySelect(item.new_value, (value) => decide("approved", { item_ids: [item.id], new_values: { [item.id]: value } })))
+      : `${item.old_name || "—"} → ${item.new_name || "—"}`;
+  } else {
+    subject = el("a", { href: "#", onclick: (e) => { e.preventDefault(); openBookmarkFromPanel(item.bookmark_id); } }, `#${item.bookmark_id} ${item.title || ""}`);
+    change = `merge into #${item.target_id}`;
+  }
+  const conf = item.confidence === null ? "" : `${Math.round(item.confidence * 100)}%`;
+  return el("tr", { class: `decision-${item.decision}` },
+    el("td", {}, el("span", { class: `cs-status ${item.decision}` }, DECISION_LABELS[item.decision] || item.decision)),
+    el("td", {}, subject), el("td", {}, change),
+    el("td", { class: item.confidence !== null && item.confidence < 0.6 ? "low" : "" }, conf),
+    el("td", { class: "muted" }, item.result && item.decision === "conflict" ? item.result : item.rationale || ""),
+    el("td", { class: "actions" }, editable ? [
+      el("button", { class: `link${item.decision === "approved" ? " on" : ""}`, onclick: () => decide("approved", { item_ids: [item.id] }) }, "Approve"),
+      el("button", { class: "link danger", onclick: () => decide("rejected", { item_ids: [item.id] }) }, "Reject"),
+    ] : null),
+  );
+}
+
 // ------------------------------------------------------------------ import / export
 
 function closeMenus() {
@@ -1070,12 +1375,24 @@ for (const th of document.querySelectorAll("th[data-sort]")) {
   });
 }
 for (const b of document.querySelectorAll("[data-bulk]")) b.addEventListener("click", () => bulk(b.dataset.bulk));
+$("#bulk-category").addEventListener("change", async (e) => {
+  const value = e.target.value;
+  e.target.value = "";
+  if (value === "") return;
+  const ids = [...state.selected];
+  try {
+    await api("POST", "/api/bookmarks/bulk", { ids, action: "category", category_id: Number(value) });
+    toast(`${ids.length} ${Number(value) ? "categorised" : "uncategorised"}`);
+    state.selected.clear();
+  } catch (err) {
+    showError(err);
+  }
+  await refresh();
+});
 for (const a of document.querySelectorAll("[data-panel]")) {
   a.addEventListener("click", (e) => {
     e.preventDefault();
-    showPanel(a.dataset.panel);
-    loadMeta();
-    ({ runs: loadRuns, health: loadHealth, duplicates: loadDuplicates })[a.dataset.panel]().catch(showError);
+    openPanel(a.dataset.panel);
   });
 }
 

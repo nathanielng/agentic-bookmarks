@@ -35,10 +35,14 @@
   <div class="layout">
     <nav class="sidebar">
       <ul id="views"></ul>
+      <h2>Categories</h2>
+      <ul id="categories"></ul>
       <h2>Devices &amp; sources</h2>
       <ul id="sources"></ul>
       <h2>System</h2>
       <ul>
+        <li><a href="#" data-panel="review" title="Changes the AI (or an agent) proposed, waiting for you">AI review<span class="count" id="review-count"></span></a></li>
+        <li><a href="#" data-panel="categories" title="Add, rename or remove categories; ask the AI to suggest them">Manage categories</a></li>
         <li><a href="#" data-panel="duplicates" title="Bookmarks that look like the same page">Duplicates<span class="count" id="dup-count"></span></a></li>
         <li><a href="#" data-panel="runs">Import runs</a></li>
         <li><a href="#" data-panel="health">Health</a></li>
@@ -52,6 +56,7 @@
           <button data-bulk="star">Star</button>
           <button data-bulk="status:kept">Keep</button>
           <button data-bulk="status:inbox">Back to Inbox</button>
+          <select id="bulk-category" aria-label="Set category" title="Set the category of the selected bookmarks"></select>
           <button data-bulk="refetch">Fetch again</button>
           <button data-bulk="delete" class="danger">Move to Trash</button>
           <button data-bulk="restore" class="trash-only">Restore</button>
@@ -63,9 +68,10 @@
               <th class="check"><input type="checkbox" id="select-all" aria-label="Select all on this page"></th>
               <th data-sort="saved_at">Saved at</th>
               <th data-sort="title">Title</th>
-              <th data-sort="domain">Domain</th>
-              <th>Sources</th>
-              <th>Remarks</th>
+              <th data-sort="domain" class="domain">Domain</th>
+              <th data-sort="category" class="category">Category</th>
+              <th class="sources">Sources</th>
+              <th class="remarks">Remarks</th>
               <th class="actions"></th>
             </tr>
           </thead>
@@ -78,6 +84,8 @@
           <span class="hint">Keys: ↓ ↑ move · S star · K keep · D trash · O open · Enter details. Double-click a title or remark to edit (edits are locked 🔒).</span>
         </div>
       </section>
+      <section id="panel-categories" hidden></section>
+      <section id="panel-review" hidden></section>
       <section id="panel-duplicates" hidden></section>
       <section id="panel-runs" hidden></section>
       <section id="panel-health" hidden></section>

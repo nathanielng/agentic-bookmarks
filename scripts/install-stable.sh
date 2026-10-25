@@ -16,8 +16,10 @@ if [ -n "$(git -C "$REPO" status --porcelain -- src pyproject.toml)" ]; then
   echo "note: uncommitted changes in src/ are NOT installed (installing $REV)"
 fi
 [ -d "$VENV" ] || uv venv -q --python 3.13 "$VENV"
-uv pip install -q --reinstall-package bmk --python "$VENV/bin/python" "bmk[web,enrich,files,macos] @ git+file://$REPO@$REV"
+uv pip install -q --reinstall-package bmk --python "$VENV/bin/python" "bmk[web,enrich,files,macos,ai,mcp] @ git+file://$REPO@$REV"
+"$REPO/scripts/install-ai.sh" "$VENV/bin/python" >/dev/null
 cd "$HOME"  # so no project .env leaks into the agent's settings
 "$VENV/bin/bmk" launchd install >/dev/null
 echo "installed bmk $REV into $VENV; background scan restarted"
 echo "daily use: $VENV/bin/bmk serve --open"
+echo "MCP (Claude Code): claude mcp add bmk -- $VENV/bin/bmk mcp"

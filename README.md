@@ -3,13 +3,14 @@
 Bookmark Manager with AI Agent support — a local-first bookmarks library for macOS.
 
 `bmk` captures URLs (starting with Safari iCloud Tabs), deduplicates them, keeps full provenance, and
-stores everything in a single SQLite database. A web UI, URL enrichment, more importers and an
-AI/MCP interface follow in later phases — see [planning/PLAN05.md](planning/PLAN05.md).
+stores everything in a single SQLite database, with a web UI, page fetching, file importers, duplicate
+review, local-AI categories and an MCP server — see [planning/PLAN05.md](planning/PLAN05.md).
 
 ## Status
 
-Code-generation phase **CG5** (duplicate review) is done. Earlier: CG1 (core, CloudTabs, CLI),
-CG2 (web UI, background scan, `bmk doctor`), CG3 (page fetching), CG4 (file importers, exports).
+Code-generation phase **CG6** (AI categories, MCP server) is done. Earlier: CG1 (core, CloudTabs, CLI),
+CG2 (web UI, background scan, `bmk doctor`), CG3 (page fetching), CG4 (file importers, exports),
+CG5 (duplicate review).
 See PLAN05 §16–17.
 
 ## Install
@@ -17,6 +18,7 @@ See PLAN05 §16–17.
 ```bash
 source ~/.venv/bin/activate
 uv pip install -e ".[dev,files,macos]"   # dev includes web and enrich; files = Markdown/XLSX, macos = clipboard
+# optional: ".[ai,mcp]" and scripts/install-ai.sh — see Categories and AI review
 python -m pytest
 ```
 
@@ -88,6 +90,63 @@ bmk dedupe recanonicalise --dry-run       # after editing src/bmk/rules/canonica
 ```
 
 Thresholds and ignored titles: `src/bmk/rules/dedupe.yaml`.
+
+## Categories and AI review
+
+Each bookmark has at most one category. Set it yourself (details pane, the bulk bar, `bmk categories set`), or
+let the local AI propose. Every AI or agent proposal is a *changeset* in **AI review**: nothing changes until
+you approve items and press **Apply**, and an applied changeset can be **reverted**. Categories you set
+yourself are never touched by the AI; an item whose bookmark changed meanwhile becomes a conflict.
+
+1. **Suggest categories** (Manage categories, or `bmk ai taxonomy`): a local LLM reads a sample of 400
+   titles and proposes 8–15 categories with one-sentence descriptions. Edit or reject any before applying.
+2. **Categorise** (`bmk ai categorize`): a local decision model picks one of the categories (or "other",
+   which proposes nothing) for each uncategorised bookmark, with a confidence. Review the least confident
+   first; approve everything above a threshold in one click.
+
+Everything runs on the Mac; models live in the Hugging Face cache (`~/.cache/huggingface/hub`).
+
+Each run is an **AI job** in its own process, separate from the web server: closing the page or stopping
+`bmk serve` doesn't stop it. One job runs at a time; others wait. **AI review** shows each job's state —
+queued, running, paused, succeeded, succeeded with errors (some bookmarks couldn't be classified),
+failed, cancelled — with progress and Pause / Resume / Cancel. A paused classification resumes where it
+stopped; a cancelled one still hands over what it proposed. A job whose process dies is marked failed.
+
+Your category list is also saved to `categories.json` next to the library (rewritten on every change; never
+in the repo). `bmk categories import [file]` loads it into another library.
+
+| Piece | Default | Setting |
+|---|---|---|
+| LLM (category list) | `mlx-community/Qwen3.8-27B-4bit` via mlx-lm (~16 GB; 24 GB Macs work) | `BMK_LLM_MODEL` |
+| Decision model | JevK5-9B Q5_K_M GGUF via llama.cpp's `llama-server` (~6.5 GB, ~1 s per bookmark) | `BMK_DECIDER_*` |
+
+```bash
+uv pip install -e ".[ai,mcp]" && scripts/install-ai.sh   # mlx-lm, MCP SDK; jevk5 client (+ brew install llama.cpp)
+bmk ai download                     # fetch the models (asks first)
+bmk ai status
+bmk ai taxonomy                     # → changeset; bmk changeset show / approve --all / apply
+bmk ai categorize                   # → changeset; approve --min-confidence 0.9, apply (Ctrl-C pauses)
+bmk ai categorize --background      # as a detached job
+bmk ai jobs                         # states and progress; bmk ai pause|resume|cancel 4
+bmk changeset list | revert 3
+bmk categories add "Recipes" -d "Cooking and food."
+```
+
+## MCP server
+
+`bmk mcp` serves the library to Claude (or any MCP client) over stdio. Register it with Claude Code:
+
+```bash
+claude mcp add bmk -- ~/.local/share/bmk/venv/bin/bmk mcp
+```
+
+- **Read**: `search_bookmarks`, `list_bookmarks`, `get_bookmark`, `list_categories`, `find_duplicates`,
+  `list_changesets`, `get_changeset`.
+- **Propose** (a changeset for you to review; there is no apply tool): `propose_categories`,
+  `propose_new_categories`, `propose_merge`. So you can also ask Claude to suggest the category list instead
+  of the local LLM; the titles it reads are then sent to Anthropic.
+- **Single-item writes** (`add_bookmark`, `update_bookmark`, `triage_bookmark` — keep, star, Trash) exist only
+  with `BMK_MCP_ALLOW_WRITES=true`. Nothing is hard-deleted.
 
 ## Page fetching (enrichment)
 

@@ -46,7 +46,7 @@ VIEWS = ("inbox", "kept", "starred", "active", "unprocessed", "failed", "date_un
 FETCH_FAILED = ("failed", "needs_browser")
 # Merge survivor: the more advanced triage status wins.
 _STATUS_RANK = {"inbox": 0, "kept": 1}
-SORTS = {"starred": "b.starred", "saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
+SORTS = {"category": "(SELECT lower(name) FROM categories c WHERE c.id = b.category_id)", "starred": "b.starred", "saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
 
 
 class NotFound(LookupError):
@@ -399,9 +399,16 @@ class Library:
         desc: bool = True,
         limit: int = 100,
         offset: int = 0,
+        category: str | int | None = None,
     ) -> dict[str, Any]:
-        """One page for the viewer: filters combine (view AND search AND status AND source), plus the total."""
+        """One page for the viewer: filters combine (view AND search AND status AND source AND category), plus the total.
+        `category` is a category id, or 'none' for uncategorised."""
         where, args = self._view_filter(view)
+        if category == "none":
+            where.append("b.category_id IS NULL")
+        elif category not in (None, ""):
+            where.append("b.category_id = ?")
+            args.append(int(category))
         join = ""
         if q and (fts := _fts_query(q)):
             join = " JOIN bookmarks_fts f ON f.rowid = b.id"
@@ -420,7 +427,7 @@ class Library:
         cond = " AND ".join(where) or "1"
         total = self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b{join} WHERE {cond}", args).fetchone()[0]
         sql = (
-            "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url,"
+            "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url, (SELECT name FROM categories c WHERE c.id = b.category_id) AS category,"
             " (SELECT json_group_array(DISTINCT CASE WHEN s.source_ref = '' THEN s.source_type ELSE s.source_ref END)"
             "    FROM sources s WHERE s.bookmark_id = b.id) AS source_labels"
             f" FROM bookmarks b{join} WHERE {cond} ORDER BY {order} LIMIT ? OFFSET ?"
@@ -542,6 +549,13 @@ class Library:
                     updates["status"] = "kept"
             if "saved_at" in fields:
                 updates.update(saved_at=to_iso(parse_iso(fields["saved_at"])), saved_at_source="user")
+            if "category_id" in fields:
+                # 0 or "" clears it; still the user's decision, so AI won't propose one.
+                cid = int(fields["category_id"] or 0) or None
+                if cid is not None and self.conn.execute("SELECT 1 FROM categories WHERE id=?", (cid,)).fetchone() is None:
+                    raise NotFound(f"category {cid} not found")
+                fields["category_id"] = cid
+                updates.update(category_id=cid, category_assigned_by="user")
             if "url" in fields:
                 updates.update(self._url_change(current, fields["url"]))
             for key in list(fields):
@@ -881,6 +895,101 @@ class Library:
             "INSERT INTO bookmark_events (bookmark_id, at, actor, kind, data_json) VALUES (?, ?, ?, ?, ?)",
             (bookmark_id, at, self.actor, kind, json.dumps(data) if data is not None else None),
         )
+
+    # ------------------------------------------------------------------ categories
+
+    def categories(self, view: str = "active") -> list[dict[str, Any]]:
+        """All categories in order, with the number of bookmarks in `view` (and an 'uncategorised' count)."""
+        where, args = self._view_filter(view)
+        cond = " AND ".join(where) or "1"
+        counts = dict(self.conn.execute(f"SELECT b.category_id, COUNT(*) FROM bookmarks b WHERE {cond} GROUP BY 1", args).fetchall())
+        rows = [dict(r) for r in self.conn.execute("SELECT * FROM categories ORDER BY position, lower(name)")]
+        for r in rows:
+            r["bookmarks"] = counts.get(r["id"], 0)
+        return rows
+
+    def uncategorised_count(self, view: str = "active") -> int:
+        where, args = self._view_filter(view)
+        cond = " AND ".join([*where, "b.category_id IS NULL"])
+        return self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b WHERE {cond}", args).fetchone()[0]
+
+    def category_by_name(self, name: str) -> dict[str, Any] | None:
+        return _row(self.conn.execute("SELECT * FROM categories WHERE lower(name) = lower(?)", (name.strip(),)).fetchone())
+
+    def add_category(self, name: str, description: str | None = None, created_by: str = "user") -> dict[str, Any]:
+        name = " ".join((name or "").split())
+        if not name:
+            raise ValueError("a category needs a name")
+        if self.category_by_name(name):
+            raise Conflict(f"category '{name}' already exists")
+        position = self.conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM categories").fetchone()[0]
+        cur = self.conn.execute(
+            "INSERT INTO categories (name, description, created_by, position, created_at) VALUES (?, ?, ?, ?, ?)",
+            (name, (description or "").strip() or None, created_by, position, now_utc()),
+        )
+        self.save_categories_file()
+        return dict(self.conn.execute("SELECT * FROM categories WHERE id=?", (cur.lastrowid,)).fetchone())
+
+    def update_category(self, category_id: int, name: str | None = None, description: str | None = None, position: int | None = None) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"category {category_id} not found")
+        updates: dict[str, Any] = {}
+        if name is not None:
+            name = " ".join(name.split())
+            if not name:
+                raise ValueError("a category needs a name")
+            other = self.category_by_name(name)
+            if other and other["id"] != category_id:
+                raise Conflict(f"category '{name}' already exists")
+            updates["name"] = name
+        if description is not None:
+            updates["description"] = description.strip() or None
+        if position is not None:
+            updates["position"] = int(position)
+        if updates:
+            cols = ", ".join(f"{k}=?" for k in updates)
+            self.conn.execute(f"UPDATE categories SET {cols} WHERE id=?", (*updates.values(), category_id))
+            self.save_categories_file()
+        return dict(self.conn.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone())
+
+    def delete_category(self, category_id: int) -> int:
+        """Remove a category; its bookmarks become uncategorised (and can be categorised again). Returns how many."""
+        if self.conn.execute("SELECT 1 FROM categories WHERE id=?", (category_id,)).fetchone() is None:
+            raise NotFound(f"category {category_id} not found")
+        now = now_utc()
+        with dbmod.transaction(self.conn):
+            ids = [r[0] for r in self.conn.execute("SELECT id FROM bookmarks WHERE category_id=?", (category_id,))]
+            for bid in ids:
+                self._event(bid, "category_removed", {"category_id": category_id}, now)
+            self.conn.execute("UPDATE bookmarks SET category_id=NULL, category_assigned_by=NULL WHERE category_id=?", (category_id,))
+            self.conn.execute("UPDATE categories SET parent_id=NULL WHERE parent_id=?", (category_id,))
+            self.conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+        self.save_categories_file()
+        return len(ids)
+
+    def save_categories_file(self) -> None:
+        """Mirror the category list to config.categories_path (a personal settings file, never in the repo)."""
+        rows = self.conn.execute("SELECT name, description FROM categories ORDER BY position, id").fetchall()
+        path = self.config.categories_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"categories": [dict(r) for r in rows]}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            log.warning("could not save %s: %s", path, exc)
+
+    def load_categories_file(self, path=None) -> list[str]:
+        """Add the categories listed in a categories.json that the library doesn't have yet; returns their names."""
+        from pathlib import Path
+
+        data = json.loads(Path(path or self.config.categories_path).read_text(encoding="utf-8"))
+        added = []
+        for c in data.get("categories", []):
+            if c.get("name") and not self.category_by_name(c["name"]):
+                added.append(self.add_category(c["name"], c.get("description"))["name"])
+        return added
 
     # ------------------------------------------------------------------ backup / restore
 
