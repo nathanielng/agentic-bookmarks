@@ -28,6 +28,7 @@ BACKUP_TABLES = (
     "url_aliases",
     "import_runs",
     "import_items",
+    "ingested_files",
     "sources",
     "tags",
     "bookmark_tags",

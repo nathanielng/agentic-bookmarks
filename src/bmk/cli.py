@@ -120,6 +120,110 @@ def _auto_process(cfg) -> None:
         console.print(f"{now_utc()} enrich " + " ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
+_PROCESS = Annotated[bool, typer.Option("--process/--no-process", help="Then fetch new pages for up to BMK_PROCESS_BUDGET seconds.")]
+
+
+def _print_file_results(results, tz: str) -> bool:
+    """One line per file, warnings and the column picker's preview; True if every file imported or was unchanged."""
+    ok = True
+    for res in results:
+        style = {"imported": "", "unchanged": "dim", "failed": "red", "needs_columns": "yellow"}[res.status]
+        line = f"{now_utc()} {res.line()}"
+        console.print(f"[{style}]{escape(line)}[/{style}]" if style else escape(line), highlight=False, soft_wrap=True)
+        for warning in res.warnings[:10]:
+            err.print(f"  [yellow]warning:[/yellow] {escape(warning)}", highlight=False)
+        if len(res.warnings) > 10:
+            err.print(f"  … {len(res.warnings) - 10} more warnings")
+        if res.columns:
+            table = Table(*[f"{n}. {h}" for n, h in enumerate(res.columns["headers"], 1)], header_style="bold", title=res.columns["sheet"])
+            for row in res.columns["preview"]:
+                table.add_row(*[escape(str(v))[:40] for v in row])
+            console.print(table)
+        ok = ok and res.status in ("imported", "unchanged")
+    return ok
+
+
+@ingest_app.command("file")
+def ingest_file(
+    paths: Annotated[list[Path], typer.Argument(help="Files or folders (folders are read recursively).")],
+    fmt: Annotated[Optional[str], typer.Option("--format", help="rtf, html, markdown, csv or xlsx (default: by extension).")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Read files again even if their content was imported before.")] = False,
+    include_code: Annotated[bool, typer.Option("--include-code", help="Markdown: also take URLs in code.")] = False,
+    url_col: Annotated[Optional[str], typer.Option("--url-col", help="CSV/XLSX: URL column (header or number).")] = None,
+    title_col: Annotated[Optional[str], typer.Option("--title-col", help="CSV/XLSX: title column.")] = None,
+    date_col: Annotated[Optional[str], typer.Option("--date-col", help="CSV/XLSX: save-date column.")] = None,
+    sheets: Annotated[Optional[list[str]], typer.Option("--sheet", help="XLSX: only these sheets (repeatable).")] = None,
+    process_after: _PROCESS = True,
+) -> None:
+    """Import links from RTF, HTML, Markdown, CSV or XLSX files."""
+    from .ingest.files import FileOptions, import_paths
+
+    cfg = get_config()
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        _fail(f"not found: {', '.join(missing)}")
+    opts = FileOptions(include_code=include_code, url_col=url_col, title_col=title_col, date_col=date_col, sheets=sheets, tz=cfg.display_tz)
+    lib = _lib()
+    try:
+        results = import_paths(lib, paths, fmt=fmt, force=force, opts=opts)
+    finally:
+        lib.close()
+    if not results:
+        _fail("no importable files (.rtf .html .md .txt .csv .tsv .xlsx)")
+    ok = _print_file_results(results, cfg.display_tz)
+    if process_after and any(r.status == "imported" for r in results):
+        _auto_process(cfg)
+    if not ok:
+        raise typer.Exit(1)
+
+
+def _format_alias(fmt: str, help_text: str):
+    def command(
+        paths: Annotated[list[Path], typer.Argument(help="Files or folders.")],
+        force: Annotated[bool, typer.Option("--force", help="Read files again even if imported before.")] = False,
+        include_code: Annotated[bool, typer.Option("--include-code", help="Markdown: also take URLs in code.")] = False,
+        url_col: Annotated[Optional[str], typer.Option("--url-col", help="CSV/XLSX: URL column (header or number).")] = None,
+        title_col: Annotated[Optional[str], typer.Option("--title-col", help="CSV/XLSX: title column.")] = None,
+        date_col: Annotated[Optional[str], typer.Option("--date-col", help="CSV/XLSX: save-date column.")] = None,
+        sheets: Annotated[Optional[list[str]], typer.Option("--sheet", help="XLSX: only these sheets.")] = None,
+        process_after: _PROCESS = True,
+    ) -> None:
+        ingest_file(paths, fmt, force, include_code, url_col, title_col, date_col, sheets, process_after)
+
+    command.__doc__ = help_text
+    return command
+
+
+for _fmt, _help in (
+    ("rtf", "Import links from RTF files (e.g. tabs pasted into TextEdit)."),
+    ("markdown", "Import links from Markdown files or a folder of them (iOS Shortcut inbox.md lines keep their time)."),
+    ("csv", "Import a CSV of links (the URL column is detected; override with --url-col)."),
+    ("xlsx", "Import an Excel workbook (hyperlink targets are read; --sheet picks sheets)."),
+):
+    ingest_app.command(_fmt)(_format_alias(_fmt, _help))
+
+
+@ingest_app.command("clipboard")
+def ingest_clipboard(process_after: _PROCESS = True) -> None:
+    """Import links on the clipboard (copied from Safari, Notes, a web page…): HTML, then RTF, then plain text."""
+    from .ingest.files import import_clipboard
+    from .ingest.rtf import FileFormatError
+
+    cfg = get_config()
+    lib = _lib()
+    try:
+        result = import_clipboard(lib)
+    except FileFormatError as exc:
+        _fail(str(exc))
+    finally:
+        lib.close()
+    ok = _print_file_results([result], cfg.display_tz)
+    if process_after and result.status == "imported":
+        _auto_process(cfg)
+    if not ok:
+        raise typer.Exit(1)
+
+
 @app.command()
 def add(
     url: str,
@@ -344,17 +448,26 @@ def runs(
 @app.command()
 def export(
     output: Annotated[Optional[Path], typer.Option("--output", "-o", help="File to write (default: stdout).")] = None,
-    fmt: Annotated[str, typer.Option("--format", help="json (full backup)")] = "json",
+    fmt: Annotated[str, typer.Option("--format", help="json (full backup), jsonl, csv, markdown or html (Netscape).")] = "json",
+    view: Annotated[str, typer.Option(help="List to export (not json): active, inbox, kept, starred, trash, ….")] = "active",
 ) -> None:
-    """Export the library. 'json' is a full backup restorable with `bmk import-backup`."""
-    if fmt != "json":
-        _fail(f"format '{fmt}' is not available yet (CG4); use json")
-    text = json.dumps(_lib().export_backup(), indent=2, ensure_ascii=False)
+    """Export the library. 'json' is a full backup restorable with `bmk import-backup`; the other formats
+    export one list for use elsewhere ('html' imports into any browser)."""
+    from . import export as exporter
+
+    lib = _lib()
+    if fmt == "json":
+        text = json.dumps(lib.export_backup(), indent=2, ensure_ascii=False) + "\n"
+    else:
+        try:
+            text = exporter.render(fmt, exporter.rows(lib, view=view))
+        except ValueError as exc:
+            _fail(str(exc))
     if output:
-        output.write_text(text + "\n", encoding="utf-8")
+        output.write_text(text, encoding="utf-8")
         err.print(f"wrote {output}")
     else:
-        sys.stdout.write(text + "\n")
+        sys.stdout.write(text)
 
 
 @app.command("import-backup")

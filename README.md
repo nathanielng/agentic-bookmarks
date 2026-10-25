@@ -8,14 +8,14 @@ AI/MCP interface follow in later phases — see [planning/PLAN05.md](planning/PL
 
 ## Status
 
-Code-generation phase **CG3** (enrichment). CG1 (core + CloudTabs + CLI) and CG2 (web UI, background scan,
-`bmk doctor`) are done. See PLAN05 §16–17.
+Code-generation phase **CG4** (file importers and exports) is done. Earlier: CG1 (core, CloudTabs, CLI),
+CG2 (web UI, background scan, `bmk doctor`), CG3 (page fetching). See PLAN05 §16–17.
 
 ## Install
 
 ```bash
 source ~/.venv/bin/activate
-uv pip install -e ".[dev]"      # dev includes the web and enrich extras
+uv pip install -e ".[dev,files,macos]"   # dev includes web and enrich; files = Markdown/XLSX, macos = clipboard
 python -m pytest
 ```
 
@@ -36,6 +36,30 @@ sorting, inline edit (double-click a title or remark; edits are locked 🔒), bu
 delete with Undo, a detail pane (URLs, aliases, sources, history, set the saved date), import runs with
 per-item outcomes, and a Health panel. The server listens on 127.0.0.1 only and every write needs the
 token in `~/Library/Application Support/bmk/token`, which the served page carries.
+
+## Importing files and exporting
+
+```bash
+bmk ingest file notes/ tabs.rtf list.csv  # any mix; folders are read recursively
+bmk ingest rtf tabs.rtf                   # RTF via macOS textutil: links + their text, plus bare URLs
+bmk ingest markdown ~/iCloud/Bookmarks/   # [title](url), <autolinks>, bare URLs; code is skipped (--include-code)
+bmk ingest csv list.csv --url-col Link --title-col Name --date-col Added
+bmk ingest xlsx book.xlsx --sheet Reading # hyperlink targets are read, not just the cell text
+bmk ingest clipboard                      # links copied from Safari, Notes or a web page
+bmk export --format html -o bookmarks.html   # Netscape file any browser imports; also csv, markdown, jsonl
+bmk export --format markdown --view starred
+```
+
+- A file whose content was imported before is skipped (by SHA-256), even under another name; `--force` reads it again.
+- Links get the file's creation time as an approximate (`~`) save time, unless the file says better:
+  an iOS Shortcut line `- 2026-10-25T13:30+08:00 [Title](URL)` or a CSV/XLSX date column is exact.
+- CSV/XLSX: the URL column is a header like url/link/website, else the column that is >80% URLs. When that
+  is ambiguous the CLI shows the columns and a preview; the web UI shows a column picker. Other columns
+  become remarks on new bookmarks, and rows without a valid URL are recorded as invalid.
+- Provenance: RTF/HTML `#n` (link order), Markdown `line n`, CSV `row n`, XLSX `Sheet!Rn`.
+- A file that can't be read is reported (and recorded as a failed import run); the other files still import.
+- Web UI: **Import ▾** (Files…, From clipboard) and **Export ▾**, which exports the list on screen with its
+  search and device filter.
 
 ## Page fetching (enrichment)
 
@@ -104,7 +128,7 @@ bmk star 12 [--off]                       # keep + Starred (or remove the star)
 bmk list --view unprocessed | failed      # not fetched yet / fetch failed or blocked
 bmk rm 12 && bmk restore 12               # soft delete / Trash
 bmk runs                                  # import history; `bmk runs <id>` for per-item outcomes
-bmk export -o backup.json                 # full backup
+bmk export -o backup.json                 # full backup (restorable)
 BMK_DB_PATH=/tmp/fresh.db bmk import-backup backup.json
 ```
 

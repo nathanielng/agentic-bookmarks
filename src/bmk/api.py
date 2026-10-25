@@ -12,12 +12,14 @@ from contextlib import contextmanager
 from importlib import resources
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__, doctor, launchd
+from . import export as exporter
 from . import db as dbmod
 from .config import Config, get_config
 from .ingest.cloudtabs import CloudTabsError, CloudTabsPermissionDenied, run_import
@@ -26,6 +28,7 @@ from .service import Conflict, Library, NotFound
 
 TOKEN_HEADER = "X-BMK-Token"
 WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
+MAX_UPLOAD = 50 * 1024 * 1024
 
 
 def load_token(config: Config) -> str:
@@ -164,10 +167,21 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
         return launchd.read_log(max(1, min(lines, 2000)))
 
     @app.get("/api/export")
-    def export() -> JSONResponse:
+    def export(
+        format: str = "json", view: str = "active", q: str | None = None, source_type: str | None = None, source_ref: str | None = None
+    ) -> Response:
+        """`json` is the full backup; the other formats export one list (the UI passes its current filters)."""
+        if format == "json":
+            with library() as lib:
+                data = lib.export_backup()
+            return JSONResponse(data, headers={"Content-Disposition": 'attachment; filename="bmk-backup.json"'})
+        if format not in exporter.FORMATS:
+            raise HTTPException(400, f"format must be one of json, {', '.join(exporter.FORMATS)}")
+        media, ext = exporter.FORMATS[format]
         with library() as lib:
-            data = lib.export_backup()
-        return JSONResponse(data, headers={"Content-Disposition": 'attachment; filename="bmk-backup.json"'})
+            text = exporter.render(format, exporter.rows(lib, view=view, q=q, source_type=source_type, source_ref=source_ref))
+        name = f"bookmarks-{view}.{ext}"
+        return Response(text, media_type=f"{media}; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     # ------------------------------------------------------------------ write
 
@@ -241,6 +255,74 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
                 return JSONResponse({"detail": str(exc), "kind": kind}, status_code=503)
         kick()
         return JSONResponse({"run_id": summary.run_id, "counts": summary.counts, "line": summary.line()})
+
+    async def upload(request: Request) -> bytes:
+        data = await request.body()
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(413, f"file is larger than {MAX_UPLOAD // 2**20} MB")
+        return data
+
+    @app.post("/api/import/preview")
+    async def import_preview(request: Request, name: str, sheet: list[str] | None = Query(None)) -> dict[str, Any]:
+        """Detected columns and the first rows of a CSV/XLSX upload (body = the file), for the column picker."""
+        from .ingest import files, table
+
+        data = await upload(request)
+        fmt = files.format_of(name)
+        if fmt not in ("csv", "xlsx"):
+            return {"format": fmt, "sheets": []}
+        try:
+            return {"format": fmt, "sheets": await run_in_threadpool(table.preview, data, fmt, sheet)}
+        except table.FileFormatError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/import")
+    async def import_file(
+        request: Request,
+        name: str,
+        format: str | None = None,
+        force: bool = False,
+        include_code: bool = False,
+        url_col: str | None = None,
+        title_col: str | None = None,
+        date_col: str | None = None,
+        sheet: list[str] | None = Query(None),
+        mtime: float | None = None,
+    ) -> JSONResponse:
+        """Import one uploaded file (body = its bytes). `mtime` (ms, from the browser) dates its links."""
+        from datetime import UTC, datetime
+
+        from .ingest.files import FileOptions, import_data
+
+        data = await upload(request)
+        opts = FileOptions(
+            include_code=include_code, url_col=url_col, title_col=title_col, date_col=date_col, sheets=sheet, tz=config.display_tz
+        )
+        when = (datetime.fromtimestamp(mtime / 1000, UTC), "file_mtime") if mtime else None
+
+        def work():
+            with library() as lib:
+                return import_data(lib, data, name=name.rsplit("/", 1)[-1], fmt=format, when=when, force=force, opts=opts)
+
+        result = await run_in_threadpool(work)
+        if result.status == "imported":
+            kick()
+        code = {"imported": 200, "unchanged": 200, "needs_columns": 409}.get(result.status, 422)
+        return JSONResponse({**result.as_dict(), "detail": result.error}, status_code=code)
+
+    @app.post("/api/ingest/clipboard")
+    def ingest_clipboard() -> JSONResponse:
+        from .ingest.files import import_clipboard
+        from .ingest.rtf import FileFormatError
+
+        with library() as lib:
+            try:
+                result = import_clipboard(lib)
+            except FileFormatError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=503)
+        if result.status == "imported":
+            kick()
+        return JSONResponse({**result.as_dict(), "detail": result.error}, status_code=200 if result.status == "imported" else 422)
 
     @app.post("/api/bookmarks")
     def add(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:

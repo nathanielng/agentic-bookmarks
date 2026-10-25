@@ -12,7 +12,24 @@
     <h1>Bookmarks</h1>
     <input id="search" type="search" placeholder="Search title, URL, remarks…  ( / )" autocomplete="off">
     <button id="scan" title="Read Safari iCloud Tabs now">Scan iCloud Tabs</button>
-    <a class="button" href="/api/export" download>Export JSON</a>
+    <details class="menu" id="import-menu">
+      <summary class="button" title="Import links from files or the clipboard">Import</summary>
+      <div class="menu-items">
+        <button data-import="files" title="RTF, HTML, Markdown, CSV or Excel; a file already imported is skipped">Files…</button>
+        <button data-import="clipboard" title="Links copied from Safari, Notes or a web page">From clipboard</button>
+      </div>
+    </details>
+    <input id="import-file" type="file" multiple hidden accept=".rtf,.html,.htm,.md,.markdown,.txt,.csv,.tsv,.xlsx,.xlsm">
+    <details class="menu" id="export-menu">
+      <summary class="button" title="Export the list shown (with its filters and search)">Export</summary>
+      <div class="menu-items">
+        <button data-export="html" title="Netscape bookmarks file: imports into any browser">Browser bookmarks (.html)</button>
+        <button data-export="csv">Spreadsheet (.csv)</button>
+        <button data-export="markdown">Markdown (.md)</button>
+        <button data-export="jsonl">JSON lines (.jsonl)</button>
+        <button data-export="json" title="Everything, restorable with bmk import-backup">Full backup (.json)</button>
+      </div>
+    </details>
   </header>
   <div id="banner" class="banner" hidden></div>
   <div class="layout">
@@ -65,6 +82,7 @@
     </main>
     <aside id="detail" class="detail" hidden></aside>
   </div>
+  <dialog id="picker" class="picker"></dialog>
   <div id="toast" class="toast" hidden></div>
   <script src="/static/app.js"></script>
 </body>

@@ -90,6 +90,11 @@ function fallbackTitle(url) {
   }
 }
 
+// A file source's ref is its full path; show the file name (the path is in the tooltip).
+function sourceLabel(ref) {
+  return ref && ref.includes("/") ? ref.slice(ref.lastIndexOf("/") + 1) : ref;
+}
+
 function safeHref(url) {
   return /^https?:\/\//i.test(url || "") ? url : undefined;
 }
@@ -156,7 +161,7 @@ async function loadMeta() {
           class: active ? "active" : "",
           title: active ? "Click again to show all sources" : `Only ${s.source_ref || s.source_type} (combines with the list above)`,
           onclick: (e) => { e.preventDefault(); selectSource(s); },
-        }, s.source_ref || s.source_type, el("span", { class: "count" }, s.bookmarks)),
+        }, sourceLabel(s.source_ref) || s.source_type, el("span", { class: "count" }, s.bookmarks)),
       );
     }),
   );
@@ -339,7 +344,7 @@ function renderRows() {
         editableCell(item, "title", title, open, fetchMark(item),
           item.description ? el("div", { class: "desc", title: item.description }, item.description) : null),
         el("td", { class: "domain" }, item.domain || ""),
-        el("td", { class: "sources" }, ...item.source_labels.map((s) => el("span", { class: "badge" }, s))),
+        el("td", { class: "sources" }, ...item.source_labels.map((s) => el("span", { class: "badge", title: s }, sourceLabel(s)))),
         editableCell(item, "remarks", item.remarks || ""),
         el("td", { class: "actions" }, ...actionButtons(item)),
       );
@@ -574,7 +579,7 @@ async function openDetail(id) {
     el("table", { class: "mini" },
       el("thead", {}, el("tr", {}, el("th", {}, "Source"), el("th", {}, "Device / file"), el("th", {}, "First seen"), el("th", {}, "Last seen"))),
       el("tbody", {}, ...b.sources.map((s) => el("tr", {},
-        el("td", {}, s.source_type), el("td", {}, s.source_ref || "—"),
+        el("td", {}, s.source_type), el("td", { title: s.source_ref }, sourceLabel(s.source_ref) || "—"),
         el("td", {}, fmtDate(s.first_seen_at)), el("td", {}, fmtDate(s.last_seen_at)),
       ))),
     ),
@@ -779,6 +784,116 @@ async function scan() {
   }
 }
 
+// ------------------------------------------------------------------ import / export
+
+function closeMenus() {
+  for (const d of document.querySelectorAll("details.menu[open]")) d.open = false;
+}
+
+function exportList(format) {
+  closeMenus();
+  const params = new URLSearchParams({ format });
+  if (format !== "json") {  // the list on screen, with its search and source filter
+    params.set("view", state.view);
+    if (state.q) params.set("q", state.q);
+    if (state.source) {
+      params.set("source_type", state.source.source_type);
+      if (state.source.source_ref) params.set("source_ref", state.source.source_ref);
+    }
+  }
+  location.href = `/api/export?${params}`;
+}
+
+async function upload(file, params) {
+  const res = await fetch(`/api/import?${params}`, {
+    method: "POST", headers: { "X-BMK-Token": TOKEN, "Content-Type": "application/octet-stream" }, body: file,
+  });
+  return { status: res.status, data: await res.json().catch(() => ({ detail: `HTTP ${res.status}` })) };
+}
+
+function importLine(name, data) {
+  if (data.status === "imported") {
+    const c = data.counts || {};
+    const parts = [`${c.new || 0} new`];
+    const matched = (c.matched_exact || 0) + (c.matched_alias || 0);
+    if (matched) parts.push(`${matched} already here`);
+    if (c.invalid || c.skipped) parts.push(`${(c.invalid || 0) + (c.skipped || 0)} skipped`);
+    return `${name}: ${parts.join(", ")}`;
+  }
+  if (data.status === "unchanged") return `${name}: already imported`;
+  return `${name}: ${data.detail || "failed"}`;
+}
+
+async function importFiles(files) {
+  const lines = [];
+  for (const file of files) {
+    const params = new URLSearchParams({ name: file.name, mtime: file.lastModified });
+    let { status, data } = await upload(file, params);
+    if (status === 409 && data.columns) {
+      const choice = await pickColumns(file.name, data.columns);
+      if (!choice) {
+        lines.push(`${file.name}: not imported`);
+        continue;
+      }
+      for (const [k, v] of Object.entries(choice)) if (v !== "") params.set(k, v);
+      ({ status, data } = await upload(file, params));
+    }
+    lines.push(importLine(file.name, data));
+  }
+  toast(lines.join(" · "), { label: "Import runs", run: () => { showPanel("runs"); loadRuns().catch(showError); } });
+  await refresh();
+}
+
+async function importClipboard() {
+  closeMenus();
+  try {
+    toast(importLine("Clipboard", await api("POST", "/api/ingest/clipboard")));
+  } catch (err) {
+    showError(err);
+  }
+  await refresh();
+}
+
+// CSV/XLSX whose URL column can't be detected: choose the columns from a preview of the first rows.
+function pickColumns(fileName, cols) {
+  const dialog = $("#picker");
+  const option = (value, label) => el("option", { value }, label);
+  const colSpec = (i) => (cols.headers[i].startsWith("column ") ? String(i + 1) : cols.headers[i]);
+  const select = (none) => {
+    const s = el("select", {});
+    if (none) s.append(option("", "—"));
+    cols.headers.forEach((h, i) => s.append(option(colSpec(i), h)));
+    return s;
+  };
+  const url = select(false), title = select(true), date = select(true);
+  const table = el("table", {});
+  const paint = () => {
+    const at = cols.headers.findIndex((_, i) => colSpec(i) === url.value);
+    fill(table,
+      el("thead", {}, el("tr", {}, ...cols.headers.map((h, i) => el("th", { class: i === at ? "pick-url" : "" }, h)))),
+      el("tbody", {}, ...cols.preview.map((row) =>
+        el("tr", {}, ...cols.headers.map((_, i) => el("td", { class: i === at ? "pick-url" : "", title: row[i] || "" }, row[i] || "")))))
+    );
+  };
+  url.addEventListener("change", paint);
+  paint();
+  return new Promise((resolve) => {
+    const done = (value) => { dialog.close(); resolve(value); };
+    fill(dialog,
+      el("h3", {}, `Which column has the links? — ${fileName}${cols.sheet ? ` (${cols.sheet})` : ""}`),
+      el("p", { class: "muted" }, cols.error.split(";")[0] + ". The first rows are shown below."),
+      el("div", { class: "cols" },
+        el("label", {}, "Link (URL)", url), el("label", {}, "Title", title), el("label", {}, "Saved date", date)),
+      el("div", { class: "table-wrap" }, table),
+      el("div", { class: "buttons" },
+        el("button", { onclick: () => done(null) }, "Cancel"),
+        el("button", { class: "primary", onclick: () => done({ url_col: url.value, title_col: title.value, date_col: date.value }) }, "Import")),
+    );
+    dialog.addEventListener("cancel", () => resolve(null), { once: true });
+    dialog.showModal();
+  });
+}
+
 let searchTimer;
 $("#search").addEventListener("input", (e) => {
   clearTimeout(searchTimer);
@@ -799,6 +914,15 @@ document.addEventListener("keydown", (e) => {
   if (!typing && triageKey(e)) e.preventDefault();
 });
 $("#scan").addEventListener("click", scan);
+for (const b of document.querySelectorAll("[data-export]")) b.addEventListener("click", () => exportList(b.dataset.export));
+document.querySelector('[data-import="files"]').addEventListener("click", () => { closeMenus(); $("#import-file").click(); });
+document.querySelector('[data-import="clipboard"]').addEventListener("click", importClipboard);
+$("#import-file").addEventListener("change", (e) => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  if (files.length) importFiles(files).catch(showError);
+});
+document.addEventListener("click", (e) => { if (!e.target.closest("details.menu")) closeMenus(); });
 $("#prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); refresh(); });
 $("#next").addEventListener("click", () => { state.offset += state.limit; refresh(); });
 $("#select-all").addEventListener("change", (e) => {
