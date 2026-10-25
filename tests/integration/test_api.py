@@ -162,3 +162,19 @@ def test_scan_log_returns_the_tail(client, tmp_path, monkeypatch):
     log.write_text("".join(f"run {i}\n" for i in range(1, 301)))
     body = client.get("/api/log", params={"lines": 3}).json()
     assert body["exists"] and body["lines"] == ["run 298", "run 299", "run 300"]
+
+
+def test_list_and_device_filters_stack(client, cloudtabs):
+    cloudtabs.open_tab("P1", "https://example.com/p1", "Phone 1")
+    cloudtabs.open_tab("P2", "https://example.com/p2", "Phone 2")
+    cloudtabs.open_tab("M1", "https://example.com/m1", "Mac 1", device="DEV-MAC")
+    scan(client)
+    phone = {"source_type": "cloudtabs", "source_ref": "Test iPhone"}
+    p1 = next(i["id"] for i in client.get("/api/bookmarks", params={"q": "Phone 1"}).json()["items"])
+    client.patch(f"/api/bookmarks/{p1}", json={"status": "kept"}, headers=client.headers_w)
+
+    inbox_phone = client.get("/api/bookmarks", params={"view": "inbox", **phone}).json()
+    assert [i["title"] for i in inbox_phone["items"]] == ["Phone 2"]
+    meta = client.get("/api/meta", params={"view": "inbox", **phone}).json()
+    assert meta["counts"]["inbox"] == 1 and meta["counts"]["kept"] == 1  # lists counted within the phone
+    assert {s["source_ref"]: s["bookmarks"] for s in meta["sources"]} == {"Test iPhone": 1, "Test MacBook": 1}  # devices within Inbox

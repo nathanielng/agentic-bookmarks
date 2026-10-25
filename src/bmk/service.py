@@ -24,6 +24,7 @@ BACKUP_FORMAT = "bmk-backup"
 BACKUP_TABLES = (
     "categories",
     "bookmarks",
+    "processing_jobs",
     "url_aliases",
     "import_runs",
     "import_items",
@@ -35,8 +36,12 @@ BACKUP_TABLES = (
 
 _SELECT_BOOKMARK = "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url FROM bookmarks b"
 
-# Smart lists available so far; Unprocessed, Failed, Duplicates and Categories arrive with CG3/CG5.
-VIEWS = ("inbox", "kept", "active", "date_unknown", "resaved", "trash")
+# Smart lists available so far; Duplicates and Categories arrive with CG5.
+VIEWS = ("inbox", "kept", "active", "unprocessed", "failed", "date_unknown", "resaved", "trash")
+# Enrichment outcomes (bookmarks.fetch_status) that put a bookmark in the "failed" list.
+FETCH_FAILED = ("failed", "needs_browser")
+# Merge survivor: the more advanced triage status wins.
+_STATUS_RANK = {"inbox": 0, "kept": 1}
 SORTS = {"saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
 
 
@@ -308,6 +313,12 @@ class Library:
             )
         ]
         row["events"] = [dict(r) for r in self.conn.execute("SELECT * FROM bookmark_events WHERE bookmark_id=? ORDER BY id", (bookmark_id,))]
+        row["job"] = _row(
+            self.conn.execute(
+                "SELECT state, attempts, next_run_at, last_error, updated_at FROM processing_jobs WHERE bookmark_id=? AND kind='enrich'",
+                (bookmark_id,),
+            ).fetchone()
+        )
         return row
 
     def list(
@@ -337,12 +348,28 @@ class Library:
         )
         return [dict(r) for r in self.conn.execute(sql, (*args, limit, offset))]
 
-    def count(self, view: str = "active") -> int:
+    def count(self, view: str = "active", source_type: str | None = None, source_ref: str | None = None) -> int:
         where, args = self._view_filter(view)
+        src_where, src_args = self._source_filter(source_type, source_ref)
+        where, args = where + src_where, args + src_args
         return self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b WHERE {' AND '.join(where) or '1'}", args).fetchone()[0]
 
-    def view_counts(self) -> dict[str, int]:
-        return {view: self.count(view) for view in VIEWS}
+    def view_counts(self, source_type: str | None = None, source_ref: str | None = None) -> dict[str, int]:
+        """Bookmarks per list, within one source (e.g. a device) if given, so the sidebar counts stack."""
+        return {view: self.count(view, source_type, source_ref) for view in VIEWS}
+
+    @staticmethod
+    def _source_filter(source_type: str | None, source_ref: str | None) -> tuple[list[str], list[Any]]:
+        if not (source_type or source_ref):
+            return [], []
+        sub, args = ["s.bookmark_id = b.id"], []
+        if source_type:
+            sub.append("s.source_type = ?")
+            args.append(source_type)
+        if source_ref:
+            sub.append("s.source_ref = ?")
+            args.append(source_ref)
+        return [f"EXISTS (SELECT 1 FROM sources s WHERE {' AND '.join(sub)})"], args
 
     def browse(
         self,
@@ -367,15 +394,9 @@ class Library:
         if status:
             where.append("b.status = ?")
             args.append(status)
-        if source_type or source_ref:
-            sub = ["s.bookmark_id = b.id"]
-            if source_type:
-                sub.append("s.source_type = ?")
-                args.append(source_type)
-            if source_ref:
-                sub.append("s.source_ref = ?")
-                args.append(source_ref)
-            where.append(f"EXISTS (SELECT 1 FROM sources s WHERE {' AND '.join(sub)})")
+        src_where, src_args = self._source_filter(source_type, source_ref)
+        where += src_where
+        args += src_args
         if sort not in SORTS:
             raise ValueError(f"sort must be one of {', '.join(SORTS)}")
         direction = "DESC" if desc else "ASC"
@@ -397,14 +418,27 @@ class Library:
             items.append(item)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
-    def source_refs(self) -> list[dict[str, Any]]:
-        """Distinct (source_type, source_ref) pairs with active bookmark counts, e.g. one per device."""
+    def source_refs(self, view: str = "active") -> list[dict[str, Any]]:
+        """Distinct (source_type, source_ref) pairs, e.g. one per device, with their bookmark count in `view`.
+
+        Every source with live bookmarks is listed, with 0 when none of them are in the view.
+        """
+        where, args = self._view_filter(view)
+        counts = {
+            (r[0], r[1]): r[2]
+            for r in self.conn.execute(
+                "SELECT s.source_type, s.source_ref, COUNT(DISTINCT s.bookmark_id) FROM sources s"
+                f" JOIN bookmarks b ON b.id = s.bookmark_id WHERE {' AND '.join(where) or '1'} GROUP BY 1, 2",
+                args,
+            )
+        }
         sql = (
-            "SELECT s.source_type, s.source_ref, COUNT(DISTINCT s.bookmark_id) AS bookmarks FROM sources s"
-            " JOIN bookmarks b ON b.id = s.bookmark_id WHERE b.deleted_at IS NULL AND b.merged_into_id IS NULL"
-            " GROUP BY s.source_type, s.source_ref ORDER BY s.source_type, s.source_ref"
+            "SELECT DISTINCT s.source_type, s.source_ref FROM sources s JOIN bookmarks b ON b.id = s.bookmark_id"
+            " WHERE b.merged_into_id IS NULL ORDER BY s.source_type, s.source_ref"
         )
-        return [dict(r) for r in self.conn.execute(sql)]
+        return [
+            {"source_type": t, "source_ref": r, "bookmarks": counts.get((t, r), 0)} for t, r in self.conn.execute(sql)
+        ]
 
     def last_run(self, source_type: str) -> dict[str, Any] | None:
         return _row(
@@ -422,6 +456,10 @@ class Library:
             return [*live, "b.deleted_at IS NULL", "b.status = 'kept'"], []
         if view == "trash":
             return [*live, "b.deleted_at IS NOT NULL"], []
+        if view == "unprocessed":
+            return [*live, "b.deleted_at IS NULL", "b.fetch_status = 'pending'"], []
+        if view == "failed":
+            return [*live, "b.deleted_at IS NULL", f"b.fetch_status IN ({', '.join('?' for _ in FETCH_FAILED)})"], list(FETCH_FAILED)
         if view == "date_unknown":
             return [*live, "b.deleted_at IS NULL", "b.saved_at IS NULL"], []
         if view == "resaved":
@@ -537,6 +575,153 @@ class Library:
         now = now_utc()
         self.conn.execute("UPDATE bookmarks SET deleted_at=?, updated_at=? WHERE id=?", (deleted_at, now, bookmark_id))
         self._event(bookmark_id, kind, data, now)
+
+    # ------------------------------------------------------------------ enrichment queue (CG3)
+
+    def enqueue_missing(self) -> int:
+        """Queue an enrichment job for every live bookmark that has never been processed."""
+        now = now_utc()
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO processing_jobs (bookmark_id, kind, state, next_run_at, created_at, updated_at)"
+            " SELECT id, 'enrich', 'pending', ?, ?, ? FROM bookmarks"
+            " WHERE fetch_status = 'pending' AND deleted_at IS NULL AND merged_into_id IS NULL",
+            (now, now, now),
+        )
+        return cur.rowcount
+
+    def refetch(self, bookmark_ids: Iterable[int]) -> int:
+        """Queue bookmarks to be fetched again now (also clears failures and retry waits)."""
+        now = now_utc()
+        count = 0
+        with dbmod.transaction(self.conn):
+            for bookmark_id in bookmark_ids:
+                if self.conn.execute("SELECT 1 FROM bookmarks WHERE id=?", (bookmark_id,)).fetchone() is None:
+                    raise NotFound(f"bookmark {bookmark_id} not found")
+                self.conn.execute(
+                    "INSERT INTO processing_jobs (bookmark_id, kind, state, next_run_at, created_at, updated_at)"
+                    " VALUES (?, 'enrich', 'pending', ?, ?, ?)"
+                    " ON CONFLICT (bookmark_id, kind) DO UPDATE SET state='pending', attempts=0, next_run_at=excluded.next_run_at,"
+                    " lease_until=NULL, last_error=NULL, updated_at=excluded.updated_at",
+                    (bookmark_id, now, now, now),
+                )
+                self.conn.execute("UPDATE bookmarks SET fetch_status='pending', fetch_error=NULL WHERE id=?", (bookmark_id,))
+                count += 1
+        return count
+
+    def retry_failed(self) -> int:
+        """Queue every failed or blocked bookmark again."""
+        ids = [r[0] for r in self.conn.execute(
+            f"SELECT id FROM bookmarks WHERE deleted_at IS NULL AND merged_into_id IS NULL AND fetch_status IN ({', '.join('?' for _ in FETCH_FAILED)})",
+            FETCH_FAILED,
+        )]
+        return self.refetch(ids)
+
+    def queue_stats(self) -> dict[str, int]:
+        """Enrichment jobs for live bookmarks: due now, waiting to retry, finished, given up."""
+        now = now_utc()
+        row = self.conn.execute(
+            "SELECT"
+            " SUM(j.state IN ('pending', 'retry_wait') AND j.next_run_at <= ?) + SUM(j.state = 'leased' AND j.lease_until < ?),"
+            " SUM(j.state = 'retry_wait' AND j.next_run_at > ?),"
+            " SUM(j.state = 'leased' AND j.lease_until >= ?),"
+            " SUM(j.state = 'done'), SUM(j.state = 'dead')"
+            " FROM processing_jobs j JOIN bookmarks b ON b.id = j.bookmark_id"
+            " WHERE b.deleted_at IS NULL AND b.merged_into_id IS NULL",
+            (now, now, now, now),
+        ).fetchone()
+        return dict(zip(("due", "waiting", "running", "done", "dead"), (v or 0 for v in row), strict=True))
+
+    def adopt_url(self, bookmark_id: int, new_url: str, kind: str, now: str) -> int:
+        """Point a bookmark at its resolved URL (a short link's destination, an unwrapped redirect).
+
+        The old canonical stays as an alias (`kind` 'short' or 'redirect'), so seeing the short link again
+        still finds this bookmark. If another bookmark already has the destination, the two are merged
+        (dedupe tier 2) and the survivor's id is returned. Call inside a transaction.
+        """
+        current = self.conn.execute("SELECT * FROM bookmarks WHERE id=?", (bookmark_id,)).fetchone()
+        canonical = urls.canonicalize(new_url)
+        if canonical == current["url_canonical"]:
+            self._update_columns(bookmark_id, {"url_resolved": new_url})
+            return bookmark_id
+        owner, _ = self._find_bookmark(canonical)
+        if owner is not None and owner["id"] != bookmark_id:
+            return self.merge(bookmark_id, owner["id"], reason="same page after resolving", now=now)
+        self.conn.execute("UPDATE url_aliases SET kind=? WHERE url_canonical=?", (kind, current["url_canonical"]))
+        self.conn.execute(
+            "INSERT OR REPLACE INTO url_aliases (url_canonical, bookmark_id, kind) VALUES (?, ?, 'canonical')", (canonical, bookmark_id)
+        )
+        self._update_columns(
+            bookmark_id,
+            {
+                "url_resolved": new_url,
+                "url_canonical": canonical,
+                "url_loose": urls.loose_key(canonical),
+                "domain": urls.domain_of(canonical),
+                "updated_at": now,
+            },
+        )
+        self._event(bookmark_id, "resolve", {"from": current["url_canonical"], "to": canonical}, now)
+        return bookmark_id
+
+    def merge(self, a_id: int, b_id: int, *, reason: str, now: str) -> int:
+        """Merge two bookmarks for the same page; returns the survivor's id. Call inside a transaction.
+
+        Survivor: the one with more locked (user-edited) fields, then the earlier, more precise saved_at, then
+        the lower id (PLAN05 §7). Sources and aliases move to the survivor; remarks are concatenated; the more
+        advanced status wins; gaps are filled from the other. The merged one keeps its row (merged_into_id) with
+        a snapshot in its event, so CG5 can un-merge.
+        """
+        a, b = (self.conn.execute("SELECT * FROM bookmarks WHERE id=?", (i,)).fetchone() for i in (a_id, b_id))
+        locks_a, locks_b = len(json.loads(a["locked_fields"])), len(json.loads(b["locked_fields"]))
+        if locks_a != locks_b:
+            survivor = a if locks_a > locks_b else b
+        elif better_saved_at(a["saved_at"], a["saved_at_source"], b["saved_at"], b["saved_at_source"]):
+            survivor = b
+        elif better_saved_at(b["saved_at"], b["saved_at_source"], a["saved_at"], a["saved_at_source"]):
+            survivor = a
+        else:
+            survivor = a if a["id"] < b["id"] else b
+        loser = b if survivor is a else a
+        locked = set(json.loads(survivor["locked_fields"]))
+        loser_locked = set(json.loads(loser["locked_fields"]))
+        updates: dict[str, Any] = {"updated_at": now}
+        if "title" not in locked and ("title" in loser_locked or (not survivor["title"] and loser["title"])):
+            updates.update(title=loser["title"], title_source=loser["title_source"])
+            if "title" in loser_locked:
+                locked.add("title")
+        if "saved_at" not in locked and better_saved_at(survivor["saved_at"], survivor["saved_at_source"], loser["saved_at"], loser["saved_at_source"]):
+            updates.update(saved_at=loser["saved_at"], saved_at_source=loser["saved_at_source"])
+        remarks = [r for r in (survivor["remarks"], loser["remarks"]) if r]
+        if len(remarks) == 2 and remarks[0] != remarks[1]:
+            updates["remarks"] = "\n\n".join(remarks)
+        elif remarks:
+            updates["remarks"] = remarks[0]
+        if _STATUS_RANK.get(loser["status"], 0) > _STATUS_RANK.get(survivor["status"], 0):
+            updates["status"] = loser["status"]
+        for col in ("description", "site_name", "author", "published_at", "image_url", "content_text", "canonical_hint"):
+            if not survivor[col] and loser[col]:
+                updates[col] = loser[col]
+        updates["locked_fields"] = json.dumps(sorted(locked))
+        self._update_columns(survivor["id"], updates)
+
+        snapshot = {
+            "bookmark": dict(loser),
+            "sources": [r[0] for r in self.conn.execute("SELECT id FROM sources WHERE bookmark_id=?", (loser["id"],))],
+            "aliases": [dict(r) for r in self.conn.execute("SELECT * FROM url_aliases WHERE bookmark_id=?", (loser["id"],))],
+        }
+        self.conn.execute("UPDATE sources SET bookmark_id=? WHERE bookmark_id=?", (survivor["id"], loser["id"]))
+        self.conn.execute("UPDATE url_aliases SET bookmark_id=? WHERE bookmark_id=?", (survivor["id"], loser["id"]))
+        self.conn.execute("UPDATE url_aliases SET kind='merged' WHERE url_canonical=?", (loser["url_canonical"],))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO bookmark_tags (bookmark_id, tag_id, assigned_by) SELECT ?, tag_id, assigned_by FROM bookmark_tags WHERE bookmark_id=?",
+            (survivor["id"], loser["id"]),
+        )
+        self.conn.execute("DELETE FROM bookmark_tags WHERE bookmark_id=?", (loser["id"],))
+        self.conn.execute("DELETE FROM processing_jobs WHERE bookmark_id=?", (loser["id"],))
+        self.conn.execute("UPDATE bookmarks SET merged_into_id=?, updated_at=? WHERE id=?", (survivor["id"], now, loser["id"]))
+        self._event(survivor["id"], "merge", {"merged": loser["id"], "reason": reason}, now)
+        self._event(loser["id"], "merged_into", {"survivor": survivor["id"], "reason": reason, "snapshot": snapshot}, now)
+        return survivor["id"]
 
     def _event(self, bookmark_id: int, kind: str, data: Any, at: str) -> None:
         self.conn.execute(

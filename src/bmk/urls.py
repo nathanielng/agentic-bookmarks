@@ -223,6 +223,9 @@ def is_shortener(url: str, rules: Rules | None = None) -> bool:
     return host in rules.shorteners
 
 
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u200e\u200f\u2066\u2067\u2068\u2069\ufeff"))
+
+
 def title_is_url(title: str | None, url: str) -> bool:
     """True if a "title" is just the URL itself, as Safari reports for tabs that never finished loading.
 
@@ -231,7 +234,8 @@ def title_is_url(title: str | None, url: str) -> bool:
     """
     if not title:
         return False
-    norm = lambda s: unquote(s.strip()).lower().rstrip("/")  # noqa: E731
+    # Safari sometimes wraps the URL in invisible direction marks (U+200E) or zero-width characters.
+    norm = lambda s: unquote(s.translate(_INVISIBLE).strip()).lower().rstrip("/")  # noqa: E731
     t = norm(title)
     full = norm(url)
     bare = full.split("://", 1)[-1]

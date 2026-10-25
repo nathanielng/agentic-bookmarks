@@ -1,0 +1,76 @@
+# Enrichment rules (PLAN05 §6). `domain` matches the host or any subdomain of it (google.com covers
+# www.google.com), `path` is a path prefix.
+
+# Redirect wrappers unwrapped without a network call: the real URL is in a query parameter.
+redirect_wrappers:
+  - {domain: google.com, path: /url, params: [q, url]}
+  - {domain: facebook.com, path: /l.php, params: [u]}
+  - {domain: l.instagram.com, path: /, params: [u]}
+  - {domain: out.reddit.com, path: /, params: [url]}
+  - {domain: linkedin.com, path: /redir/redirect, params: [url]}
+  - {domain: linkedin.com, path: /authwall, params: [sessionRedirect]}
+  - {domain: youtube.com, path: /redirect, params: [q]}
+  - {domain: t.umblr.com, path: /redirect, params: [z]}
+  - {domain: safelinks.protection.outlook.com, path: /, params: [url]}
+
+# Pages that are never fetched: the URL already says what they are, and the site would block the request.
+fetch_skip:
+  - {domain: google.com, path: /search}
+  - {domain: bing.com, path: /search}
+  - {domain: duckduckgo.com, path: /}
+  - {domain: google.com, path: /maps}
+  - {domain: mail.google.com, path: /}
+
+# Text that means the site answered with a bot check instead of the page (lowercase). Only looked for in
+# error responses and in small pages, since ordinary pages often load a captcha script for their forms.
+challenge_markers:
+  - "<title>just a moment...</title>"
+  - "cf-chl-"
+  - "challenge-platform"
+  - "/cdn-cgi/challenge"
+  - "captcha"
+  - "are you a robot"
+  - "robot check"
+  - "verify you are human"
+  - "px-captcha"
+  - "datadome"
+  - "unusual traffic from your computer"
+
+# A redirect to one of these paths means "log in first" (the destination is not the page).
+login_paths:
+  - /login
+  - /signin
+  - /sign-in
+  - /authwall
+  - /checkpoint
+  - /accounts/login
+  - /uas/login
+  - /ap/signin
+
+# Titles that say nothing about the page (lowercase, exact match after trimming).
+generic_titles:
+  - just a moment...
+  - attention required! | cloudflare
+  - access denied
+  - forbidden
+  - 403 forbidden
+  - 404 not found
+  - page not found
+  - not found
+  - error
+  - sign in
+  - log in
+  - login
+  - robot check
+  - amazon.com
+  - linkedin
+  - x
+  - twitter
+  - instagram
+  - facebook
+  - youtube
+  - medium
+  - home
+  - untitled
+  - loading...
+  - redirecting...

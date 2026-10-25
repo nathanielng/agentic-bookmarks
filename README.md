@@ -8,14 +8,14 @@ AI/MCP interface follow in later phases — see [planning/PLAN05.md](planning/PL
 
 ## Status
 
-Code-generation phase **CG2** (web UI, background scan, `bmk doctor`). CG1 (core + CloudTabs + CLI) is
-done. See PLAN05 §16–17.
+Code-generation phase **CG3** (enrichment). CG1 (core + CloudTabs + CLI) and CG2 (web UI, background scan,
+`bmk doctor`) are done. See PLAN05 §16–17.
 
 ## Install
 
 ```bash
 source ~/.venv/bin/activate
-uv pip install -e ".[dev]"      # dev includes the web extra (fastapi, uvicorn)
+uv pip install -e ".[dev]"      # dev includes the web and enrich extras
 python -m pytest
 ```
 
@@ -35,6 +35,24 @@ sorting, inline edit (double-click a title or remark; edits are locked 🔒), bu
 delete with Undo, a detail pane (URLs, aliases, sources, history, set the saved date), import runs with
 per-item outcomes, and a Health panel. The server listens on 127.0.0.1 only and every write needs the
 token in `~/Library/Application Support/bmk/token`, which the served page carries.
+
+## Page fetching (enrichment)
+
+Each new bookmark's page is fetched once, after every scan (up to `BMK_PROCESS_BUDGET` seconds) and by
+`bmk serve` in the background. Short links (lnkd.in, t.co, …) and redirect wrappers are expanded; if the
+destination is already in the library, the two bookmarks merge. The page's summary, image, author, date and
+article text are stored (the text is searchable) and shown as a preview card in the detail pane, with an
+optional **Live preview** of the real page for sites that allow it.
+
+- The title Safari showed is kept; a fetched title only fills in a missing or meaningless one.
+- Sites that answer with a bot check or a login wall go to **Fetch failed / blocked** after one try.
+- Google searches are not fetched. Nothing is fetched from private addresses (your Mac, your network).
+
+```bash
+bmk process                     # fetch everything due now (progress per bookmark)
+bmk process 12 34               # fetch these again
+bmk process --retry-failed      # try failed and blocked ones again
+```
 
 ## Background scan (launchd)
 
@@ -76,6 +94,7 @@ bmk search "bedrock agents"
 bmk show 12
 bmk edit 12 --title "Better title" --saved-at 2026-10-01T09:00+08:00   # edited fields are locked
 bmk keep 12                               # Inbox → Kept
+bmk list --view unprocessed | failed      # not fetched yet / fetch failed or blocked
 bmk rm 12 && bmk restore 12               # soft delete / Trash
 bmk runs                                  # import history; `bmk runs <id>` for per-item outcomes
 bmk export -o backup.json                 # full backup

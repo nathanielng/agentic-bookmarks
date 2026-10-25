@@ -7,6 +7,8 @@ const VIEW_LABELS = {
   inbox: "Inbox",
   kept: "Kept",
   active: "All",
+  unprocessed: "Not fetched yet",
+  failed: "Fetch failed / blocked",
   date_unknown: "Date unknown",
   resaved: "Deleted but saved again",
   trash: "Trash",
@@ -124,7 +126,12 @@ function banner(run) {
 // ------------------------------------------------------------------ sidebar
 
 async function loadMeta() {
-  const meta = await api("GET", "/api/meta");
+  const params = new URLSearchParams({ view: state.view });
+  if (state.source) {
+    params.set("source_type", state.source.source_type);
+    if (state.source.source_ref) params.set("source_ref", state.source.source_ref);
+  }
+  const meta = await api("GET", `/api/meta?${params}`);
   state.tz = meta.display_tz || "UTC";
   const views = $("#views");
   views.replaceChildren(
@@ -132,7 +139,7 @@ async function loadMeta() {
       el("li", {},
         el("a", {
           href: "#",
-          class: state.panel === "bookmarks" && state.view === view && !state.source ? "active" : "",
+          class: state.panel === "bookmarks" && state.view === view ? "active" : "",
           onclick: (e) => { e.preventDefault(); selectView(view); },
         }, label, el("span", { class: "count" }, meta.counts[view] ?? "")),
       ),
@@ -146,7 +153,7 @@ async function loadMeta() {
         el("a", {
           href: "#",
           class: active ? "active" : "",
-          title: s.source_type,
+          title: active ? "Click again to show all sources" : `Only ${s.source_ref || s.source_type} (combines with the list above)`,
           onclick: (e) => { e.preventDefault(); selectSource(s); },
         }, s.source_ref || s.source_type, el("span", { class: "count" }, s.bookmarks)),
       );
@@ -164,15 +171,17 @@ function showPanel(panel) {
   if (panel !== "bookmarks") closeDetail();
 }
 
+// The list (Inbox, Kept, …) and the source (a device) are separate filters that combine.
 function selectView(view) {
-  Object.assign(state, { view, source: null, offset: 0 });
+  Object.assign(state, { view, offset: 0 });
   state.selected.clear();
   showPanel("bookmarks");
   refresh();
 }
 
 function selectSource(source) {
-  Object.assign(state, { view: "active", source, offset: 0 });
+  const same = state.source && state.source.source_type === source.source_type && state.source.source_ref === source.source_ref;
+  Object.assign(state, { source: same ? null : source, offset: 0 });
   state.selected.clear();
   showPanel("bookmarks");
   refresh();
@@ -193,6 +202,20 @@ async function loadBookmarks() {
   state.items = page.items;
   state.total = page.total;
   renderRows();
+}
+
+const FETCH_LABELS = {
+  pending: "Not fetched yet",
+  fetched: "Fetched",
+  partial: "Fetched (not a web page, or nothing to read)",
+  skipped: "Not fetched (the link says what it is)",
+  needs_browser: "Blocked: the site wants a real browser or a login",
+  failed: "Fetch failed",
+};
+
+function fetchMark(item) {
+  if (item.fetch_status !== "failed" && item.fetch_status !== "needs_browser") return null;
+  return el("span", { class: "fetch-mark", title: `${FETCH_LABELS[item.fetch_status]}${item.fetch_error ? `: ${item.fetch_error}` : ""}` }, " ⚠");
 }
 
 function lockMark(item, field) {
@@ -303,7 +326,8 @@ function renderRows() {
       },
         el("td", { class: "check" }, check),
         el("td", { class: "date", title: item.saved_at_source }, fmtDate(item.saved_at, item.saved_at_source), lockMark(item, "saved_at")),
-        editableCell(item, "title", title, open),
+        editableCell(item, "title", title, open, fetchMark(item),
+          item.description ? el("div", { class: "desc", title: item.description }, item.description) : null),
         el("td", { class: "domain" }, item.domain || ""),
         el("td", { class: "sources" }, ...item.source_labels.map((s) => el("span", { class: "badge" }, s))),
         editableCell(item, "remarks", item.remarks || ""),
@@ -390,6 +414,8 @@ async function bulk(spec) {
     state.selected.clear();
     if (action === "delete") {
       toast(`${ids.length} moved to Trash`, { label: "Undo", run: () => api("POST", "/api/bookmarks/bulk", { ids, action: "restore" }).then(refresh) });
+    } else if (action === "refetch") {
+      toast(`${ids.length} queued to fetch again`);
     } else if (spec === "status:kept") {
       toast(`${ids.length} kept`, { label: "Undo", run: () => api("POST", "/api/bookmarks/bulk", { ids, action: "status", status: "inbox" }).then(refresh) });
     } else {
@@ -499,6 +525,7 @@ async function openDetail(id) {
         : el("button", { class: "danger", onclick: () => deleteOne(id) }, trashIcon(), " Move to Trash"),
     ),
     b.deleted_at ? el("p", { class: "warn" }, `In Trash since ${fmtDate(b.deleted_at)}. It stays deleted even if the tab is seen again.`) : null,
+    previewCard(b, href),
     row("URL", el("a", { href, target: "_blank", rel: "noopener noreferrer" }, b.url)),
     b.url_canonical !== b.url ? row("Canonical", b.url_canonical) : null,
     b.aliases.length > 1 ? row("Aliases", el("ul", {}, ...b.aliases.map((a) => el("li", {}, `${a.kind}: ${a.url_canonical}`)))) : null,
@@ -507,6 +534,7 @@ async function openDetail(id) {
       el("div", { class: "inline" }, dateInput,
         el("button", { onclick: () => dateInput.value && save({ saved_at: new Date(dateInput.value).toISOString() }) }, "Set")),
     ),
+    row("Fetch", fetchInfo(b)),
     row("Locked", b.locked_fields.length ? b.locked_fields.join(", ") : "—"),
     row("Remarks", remarks, el("button", { onclick: () => save({ remarks: remarks.value }) }, "Save remarks")),
     el("h3", {}, `Sources (${b.sources.length})`),
@@ -522,6 +550,80 @@ async function openDetail(id) {
       el("li", {}, `${fmtDate(e.at)} · ${e.actor} · ${e.kind}`, e.data_json ? el("code", {}, ` ${e.data_json}`) : null))) : null,
   );
   pane.hidden = false;
+}
+
+function previewCard(b, href) {
+  const img = safeHref(b.image_url)
+    ? el("img", { class: "preview-img", src: b.image_url, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
+    : null;
+  if (img) img.addEventListener("error", () => img.remove());
+  const byline = [b.site_name, b.author, b.published_at && b.published_at.slice(0, 10)].filter(Boolean).join(" · ");
+  const text = b.content_text || "";
+  const excerpt = text.length > 600 ? `${text.slice(0, 600).trimEnd()}…` : text;
+  const body = el("div", { class: "preview-text" }, excerpt);
+  const more = text.length > 600
+    ? el("button", { class: "link", onclick: (e) => {
+      const full = body.classList.toggle("full");
+      body.textContent = full ? text : excerpt;
+      e.target.textContent = full ? "Show less" : "Show full text";
+    } }, "Show full text")
+    : null;
+  const frame = el("div", { class: "live" });
+  const blocked = b.frame_ok === 0;
+  const live = href
+    ? el("button", {
+      disabled: blocked,
+      title: blocked ? "This site doesn't allow being shown inside another page. Use Open." : "Load the real page here (counts as a visit to the site)",
+      onclick: (e) => {
+        if (frame.firstChild) {
+          frame.replaceChildren();
+          e.target.textContent = "Live preview";
+          return;
+        }
+        fill(frame,
+          el("iframe", { src: href, title: "Live preview", loading: "lazy", referrerpolicy: "no-referrer",
+            sandbox: "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox" }),
+          el("p", { class: "muted small" }, "Blank? The site may refuse to be shown here. Use Open."));
+        e.target.textContent = "Hide live preview";
+      },
+    }, blocked ? "Live preview unavailable" : "Live preview")
+    : null;
+  if (!img && !byline && !b.description && !text && !live) return null;
+  return el("section", { class: "preview" },
+    img,
+    byline ? el("div", { class: "byline" }, byline) : null,
+    b.description ? el("p", { class: "summary" }, b.description) : null,
+    text ? body : null,
+    el("div", { class: "inline" }, more, live),
+    frame,
+  );
+}
+
+function fetchInfo(b) {
+  const label = FETCH_LABELS[b.fetch_status] || b.fetch_status;
+  const job = b.job;
+  const parts = [el("span", { class: `fetch-${b.fetch_status}` }, label)];
+  if (b.last_fetched_at) parts.push(el("span", { class: "muted" }, ` · ${fmtDate(b.last_fetched_at)}`));
+  if (b.http_status && b.http_status !== 200) parts.push(el("span", { class: "muted" }, ` · HTTP ${b.http_status}`));
+  if (b.fetch_error) parts.push(el("div", { class: "muted small" }, b.fetch_error));
+  if (job && job.state === "retry_wait") parts.push(el("div", { class: "muted small" }, `Retry ${job.attempts + 1} after ${fmtDate(job.next_run_at)}`));
+  const button = el("button", {
+    onclick: async (e) => {
+      e.target.disabled = true;
+      e.target.textContent = "Fetching…";
+      try {
+        const result = await api("POST", `/api/bookmarks/${b.id}/refetch`);
+        toast(result.merged_from ? "Same page as an existing bookmark: merged into it" : `Fetch: ${FETCH_LABELS[result.fetch_status] || result.fetch_status}`);
+        await refresh();
+        await openDetail(result.id);
+      } catch (err) {
+        showError(err);
+        e.target.disabled = false;
+        e.target.textContent = "Fetch again";
+      }
+    },
+  }, b.fetch_status === "pending" ? "Fetch now" : "Fetch again");
+  return [...parts, el("div", { class: "inline" }, button)];
 }
 
 // ------------------------------------------------------------------ runs and health panels
@@ -575,10 +677,31 @@ async function loadHealth() {
       el("span", { class: "pill" }, c.status.toUpperCase()), el("strong", {}, c.name), el("div", {}, c.detail),
       c.fix && c.status !== "ok" ? el("pre", {}, c.fix) : null,
     ))),
+    el("h3", {}, "Page fetching"),
+    queueLine(),
     el("h3", {}, "Background scan log"),
     el("div", { class: "inline" }, el("button", { onclick: () => loadLog().catch(showError) }, "Show log")),
     el("div", { id: "scan-log" }),
   );
+}
+
+function queueLine() {
+  const box = el("div", { id: "queue" }, el("p", { class: "muted" }, "…"));
+  api("GET", "/api/meta").then((meta) => {
+    const q = meta.queue;
+    if (!meta.enrich) {
+      fill(box, el("p", { class: "muted" }, "Page fetching is off (BMK_ENRICH=false) or its libraries are not installed."));
+      return;
+    }
+    fill(box,
+      el("p", {}, `${q.due} to fetch now · ${q.waiting} waiting to retry · ${q.done} done · ${q.dead} failed or blocked`,
+        meta.worker_running ? el("span", { class: "muted" }, " · fetching…") : null),
+      el("div", { class: "inline" },
+        el("button", { onclick: () => api("POST", "/api/process").then((r) => toast(r.started ? "Fetching started" : "No background worker: run bmk process")).catch(showError) }, "Fetch now"),
+        el("button", { onclick: () => selectView("failed") }, "Show failed / blocked")),
+    );
+  }).catch(showError);
+  return box;
 }
 
 async function loadLog() {

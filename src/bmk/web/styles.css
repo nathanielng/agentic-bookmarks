@@ -104,6 +104,9 @@ main h2 { font-size: 14px; }
 .grid td.date { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
 .grid td.title { min-width: 280px; }
 .grid td.title .open { margin-left: 6px; opacity: 0.6; }
+.grid td.title .desc { color: var(--muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+.fetch-mark { color: var(--warn-fg); cursor: help; }
 .grid td.domain { white-space: nowrap; color: var(--muted); }
 .grid td.remarks { color: var(--muted); max-width: 220px; }
 .grid td.editable input { width: 100%; }
@@ -123,7 +126,7 @@ main h2 { font-size: 14px; }
 .pager .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
 
 .detail {
-  width: 420px; flex: none; border-left: 1px solid var(--border); padding: 12px 16px; overflow-y: auto;
+  width: clamp(420px, 33vw, 600px); flex: none; border-left: 1px solid var(--border); padding: 12px 16px; overflow-y: auto;
   max-height: calc(100vh - var(--topbar-h)); position: sticky; top: var(--topbar-h); background: var(--bg); z-index: 1;
 }
 .detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
@@ -169,3 +172,14 @@ pre.log { max-height: 420px; overflow: auto; }
   .detail { position: fixed; right: 0; top: var(--topbar-h); bottom: 0; background: var(--bg); max-height: none; z-index: 3; box-shadow: -4px 0 16px rgba(0, 0, 0, 0.15); }
   .grid td.remarks, .grid th:nth-child(6) { display: none; }
 }
+
+.preview { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.preview-img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 6px; display: block; margin-bottom: 8px; background: var(--bg-alt); }
+.preview .byline { color: var(--muted); font-size: 12px; }
+.preview .summary { margin: 6px 0; font-weight: 500; }
+.preview-text { color: var(--muted); font-size: 12px; line-height: 1.5; white-space: pre-line; }
+.preview-text.full { max-height: 360px; overflow-y: auto; }
+.live iframe { width: 100%; height: 70vh; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; background: #fff; }
+.small { font-size: 12px; }
+.fetch-fetched { color: var(--ok); }
+.fetch-failed, .fetch-needs_browser { color: var(--warn-fg); }

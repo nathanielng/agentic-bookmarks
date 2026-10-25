@@ -13,6 +13,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import __version__, urls
+from . import db as dbmod
 from .config import get_config
 from .ingest.cloudtabs import CloudTabsError, CloudTabsIngester, run_import
 from .service import Conflict, Library, NotFound
@@ -77,6 +78,9 @@ def ingest_cloudtabs(
     devices: Annotated[Optional[list[str]], typer.Option("--device", help="Only these device names (repeatable).")] = None,
     exclude: Annotated[Optional[list[str]], typer.Option("--exclude-device", help="Skip these device names (repeatable).")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="List tabs without importing.")] = False,
+    process_after: Annotated[
+        bool, typer.Option("--process/--no-process", help="Then fetch new pages for up to BMK_PROCESS_BUDGET seconds.")
+    ] = True,
 ) -> None:
     """Import open tabs from Safari iCloud Tabs (CloudTabs.db)."""
     cfg = get_config()
@@ -99,6 +103,21 @@ def ingest_cloudtabs(
     except CloudTabsError as exc:
         _fail(str(exc))
     console.print(f"{now_utc()} {summary.line()}")
+    if process_after:
+        _auto_process(cfg)
+
+
+def _auto_process(cfg) -> None:
+    """Enrich new bookmarks right after an ingest, and so after every background scan."""
+    if not cfg.enrich or cfg.process_budget <= 0:
+        return
+    try:
+        from .enrich.worker import Worker
+    except ImportError:  # the "enrich" extra is not installed
+        return
+    stats = Worker(cfg).run(budget=cfg.process_budget)
+    if stats:
+        console.print(f"{now_utc()} enrich " + " ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
 @app.command()
@@ -238,6 +257,48 @@ def restore(bookmark_ids: list[int]) -> None:
         console.print(f"restored #{bookmark_id}")
 
 
+_OUTCOME_STYLE = {"fetched": "green", "partial": "yellow", "skipped": "dim", "needs_browser": "magenta", "failed": "red", "retry": "yellow"}
+
+
+@app.command()
+def process(
+    bookmark_ids: Annotated[Optional[list[int]], typer.Argument(help="Only these bookmarks (fetched again even if done).")] = None,
+    limit: Annotated[Optional[int], typer.Option("--limit", "-n", help="Stop after this many bookmarks.")] = None,
+    budget: Annotated[Optional[float], typer.Option(help="Stop after this many seconds.")] = None,
+    retry_failed: Annotated[bool, typer.Option("--retry-failed", help="Queue failed and blocked bookmarks again first.")] = False,
+) -> None:
+    """Fetch pages: resolve short links and add titles, summaries, images and text."""
+    cfg = get_config()
+    if not cfg.enrich:
+        _fail("enrichment is turned off (BMK_ENRICH=false)")
+    try:
+        from .enrich.worker import Worker
+    except ImportError:
+        _fail('enrichment needs the "enrich" extra: uv pip install -e ".[enrich]"')
+    lib = _lib()
+    try:
+        if retry_failed:
+            console.print(f"queued {lib.retry_failed()} failed or blocked bookmarks again")
+        if bookmark_ids:
+            lib.refetch(bookmark_ids)
+        with dbmod.transaction(lib.conn):
+            lib.enqueue_missing()
+        queue = lib.queue_stats()
+    except NotFound as exc:
+        _fail(str(exc))
+    finally:
+        lib.close()
+    console.print(f"{queue['due']} to fetch, {queue['waiting']} waiting to retry")
+
+    def show(bookmark_id: int, outcome) -> None:
+        detail = outcome.error or (outcome.meta.title if outcome.meta and outcome.meta.title else "") or ""
+        style = _OUTCOME_STYLE.get(outcome.status, "")
+        console.print(f"#{bookmark_id:<5} [{style}]{outcome.status:<13}[/{style}] {escape(detail[:100])}", highlight=False)
+
+    stats = Worker(cfg).run(budget=budget, max_jobs=limit, only_ids=bookmark_ids, on_result=show)
+    console.print(" ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "nothing to do")
+
+
 @app.command()
 def runs(
     run_id: Annotated[Optional[int], typer.Argument(help="Show item outcomes for this run.")] = None,
@@ -313,7 +374,7 @@ def serve(
         import webbrowser
 
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-    uvicorn.run(create_app(cfg), host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(create_app(cfg, background=True), host="127.0.0.1", port=port, log_level="warning")
 
 
 _STATUS_STYLE = {"ok": "[green]OK  [/green]", "warn": "[yellow]WARN[/yellow]", "fail": "[red]FAIL[/red]"}

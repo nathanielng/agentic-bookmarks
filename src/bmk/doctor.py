@@ -107,10 +107,32 @@ def check_web() -> Check:
     return Check("Web UI dependencies", WARN, "fastapi/uvicorn missing", 'uv pip install -e ".[web]"')
 
 
+def check_enrichment(config: Config) -> Check:
+    name = "Page fetching"
+    if not config.enrich:
+        return Check(name, WARN, "turned off (BMK_ENRICH=false)", "Set BMK_ENRICH=true to fetch titles, summaries and text.")
+    if not all(importlib.util.find_spec(m) for m in ("httpx", "trafilatura", "selectolax")):
+        return Check(name, WARN, "libraries not installed", 'uv pip install -e ".[enrich]"')
+    from .service import Library
+
+    lib = Library(dbmod.connect(config.db_path, migrate=False), config)
+    try:
+        q = lib.queue_stats()
+        counts = lib.view_counts()
+    finally:
+        lib.close()
+    detail = f"{q['done']} done · {q['due']} to fetch · {q['waiting']} waiting to retry · {counts['failed']} failed or blocked"
+    if q["due"] > 50:
+        return Check(name, WARN, detail, "Run: bmk process (or wait for the next background scan)")
+    return Check(name, OK, detail)
+
+
 def run_checks(config: Config, run: launchd.Runner | None = None) -> list[Check]:
     database = check_database(config)
     checks = [database, check_cloudtabs(config)]
     if database.status != FAIL:
         checks.append(check_last_scan(config))
     checks += [check_agent(run), check_web()]
+    if database.status != FAIL:
+        checks.append(check_enrichment(config))
     return checks

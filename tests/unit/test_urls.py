@@ -117,3 +117,7 @@ def test_domain_of():
     assert domain_of("https://forums.news.cnn.co.uk/x") == "cnn.co.uk"
     assert domain_of("https://lnkd.in/p/x") == "lnkd.in"
     assert domain_of("http://127.0.0.1:8000/") == "127.0.0.1"
+
+
+def test_title_is_url_ignores_invisible_marks():
+    assert title_is_url("\u200egithub.com/example/repo", "https://github.com/example/repo")

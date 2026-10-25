@@ -40,11 +40,32 @@ def load_token(config: Config) -> str:
     return token
 
 
-def create_app(config: Config | None = None) -> FastAPI:
+def _worker_class():
+    """The enrichment Worker, or None if the "enrich" extra is not installed."""
+    try:
+        from .enrich.worker import Worker
+    except ImportError:
+        return None
+    return Worker
+
+
+def create_app(config: Config | None = None, background: bool = False) -> FastAPI:
+    """`background` runs the enrichment worker in a thread (bmk serve); tests leave it off."""
     config = config or get_config()
     token = load_token(config)
     dbmod.connect(config.db_path).close()  # create / migrate up front, not on the first request
     web_dir = resources.files("bmk") / "web"
+    Worker = _worker_class() if config.enrich else None
+    worker = None
+    if background and Worker is not None:
+        from .enrich.worker import BackgroundWorker
+
+        worker = BackgroundWorker(config)
+        worker.start()
+
+    def kick() -> None:
+        if worker is not None:
+            worker.kick()
 
     app = FastAPI(title="bmk", version=__version__, docs_url=None, redoc_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
@@ -87,14 +108,18 @@ def create_app(config: Config | None = None) -> FastAPI:
         return {"ok": True, "version": __version__}
 
     @app.get("/api/meta")
-    def meta() -> dict[str, Any]:
+    def meta(view: str = "active", source_type: str | None = None, source_ref: str | None = None) -> dict[str, Any]:
+        """Sidebar data. List counts are within the selected source, source counts within the selected list."""
         with library() as lib:
             return {
-                "counts": lib.view_counts(),
-                "sources": lib.source_refs(),
+                "counts": lib.view_counts(source_type, source_ref),
+                "sources": lib.source_refs(view),
                 "last_cloudtabs_run": lib.last_run("cloudtabs"),
                 "statuses": list(STATUSES),
                 "display_tz": config.display_tz,
+                "queue": lib.queue_stats(),
+                "enrich": Worker is not None,
+                "worker_running": bool(worker and worker.running),
             }
 
     @app.get("/api/bookmarks")
@@ -175,9 +200,34 @@ def create_app(config: Config | None = None) -> FastAPI:
                     lib.restore(bookmark_id)
                 elif action == "status":
                     lib.update(bookmark_id, status=payload.get("status"))
+                elif action == "refetch":
+                    lib.refetch([bookmark_id])
                 else:
-                    raise ValueError("action must be delete, restore or status")
-            return {"ok": True, "count": len(ids)}
+                    raise ValueError("action must be delete, restore, status or refetch")
+        if action == "refetch":
+            kick()
+        return {"ok": True, "count": len(ids)}
+
+    @app.post("/api/bookmarks/{bookmark_id}/refetch")
+    def refetch(bookmark_id: int) -> dict[str, Any]:
+        """Fetch one bookmark again now and return it (waits up to ~40 s)."""
+        if Worker is None:
+            raise HTTPException(503, 'enrichment is off or the "enrich" extra is not installed')
+        with library() as lib:
+            lib.refetch([bookmark_id])
+        Worker(config).run(only_ids=[bookmark_id], budget=40)
+        with library() as lib:
+            result = lib.get(bookmark_id)
+            if result["merged_into_id"]:
+                result = lib.get(result["merged_into_id"]) | {"merged_from": bookmark_id}
+            return result
+
+    @app.post("/api/process")
+    def process() -> dict[str, Any]:
+        """Start the background worker now (it also runs every few minutes)."""
+        kick()
+        with library() as lib:
+            return {"started": worker is not None, "queue": lib.queue_stats()}
 
     @app.post("/api/ingest/cloudtabs")
     def ingest_cloudtabs() -> JSONResponse:
@@ -187,12 +237,14 @@ def create_app(config: Config | None = None) -> FastAPI:
             except CloudTabsError as exc:
                 kind = "permission" if isinstance(exc, CloudTabsPermissionDenied) else "source"
                 return JSONResponse({"detail": str(exc), "kind": kind}, status_code=503)
-            return JSONResponse({"run_id": summary.run_id, "counts": summary.counts, "line": summary.line()})
+        kick()
+        return JSONResponse({"run_id": summary.run_id, "counts": summary.counts, "line": summary.line()})
 
     @app.post("/api/bookmarks")
     def add(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         with library() as lib:
             outcome, bookmark_id = lib.add(payload.get("url", ""), title=payload.get("title"), remarks=payload.get("remarks"))
-            return {"outcome": outcome, "id": bookmark_id}
+        kick()
+        return {"outcome": outcome, "id": bookmark_id}
 
     return app

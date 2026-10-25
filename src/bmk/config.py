@@ -41,6 +41,11 @@ class Config:
     display_tz: str = field(default_factory=lambda: os.getenv("BMK_DISPLAY_TZ", "Asia/Singapore"))
     poll_interval: int = field(default_factory=lambda: int(os.getenv("BMK_POLL_INTERVAL", "1800")))
     port: int = field(default_factory=lambda: int(os.getenv("BMK_PORT", "8765")))
+    # Enrichment (CG3): fetch pages for titles, summaries and text. Off means nothing is fetched.
+    enrich: bool = field(default_factory=lambda: _env_bool("BMK_ENRICH", True))
+    # Seconds of enrichment after each `bmk ingest` (and so after each background scan); 0 disables it.
+    process_budget: int = field(default_factory=lambda: int(os.getenv("BMK_PROCESS_BUDGET", "300")))
+    fetch_concurrency: int = field(default_factory=lambda: int(os.getenv("BMK_FETCH_CONCURRENCY", "8")))
 
     @property
     def token_path(self) -> Path:
