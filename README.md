@@ -62,6 +62,11 @@ bmk launchd status
 bmk doctor                      # database, Full Disk Access, last scan, agent
 ```
 
+**Run the background scan from committed code:** `scripts/install-stable.sh` installs HEAD into a separate
+venv (`~/.local/share/bmk/venv`) and points the agent at it, so half-finished work in this checkout never
+touches the real library. Re-run it after each commit you want live; for daily use run that copy's UI:
+`~/.local/share/bmk/venv/bin/bmk serve --open`.
+
 launchd runs the Python interpreter directly, so **Full Disk Access must be granted to that
 interpreter**, not just your terminal; `bmk launchd install` and `bmk doctor` print its path. That grant
 covers anything run with this interpreter. Log: `~/Library/Logs/bmk/cloudtabs.log`, also shown in the
