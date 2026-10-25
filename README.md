@@ -41,7 +41,8 @@ bmk doctor                      # database, Full Disk Access, last scan, agent
 
 launchd runs the Python interpreter directly, so **Full Disk Access must be granted to that
 interpreter**, not just your terminal; `bmk launchd install` and `bmk doctor` print its path. That grant
-covers anything run with this interpreter. Log: `~/Library/Logs/bmk/cloudtabs.log`. Remove with
+covers anything run with this interpreter. Log: `~/Library/Logs/bmk/cloudtabs.log`, also shown in the
+web UI under Health → Show log. Remove with
 `bmk launchd uninstall`.
 
 ## Safari access (Full Disk Access)

@@ -4,6 +4,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from bmk import launchd  # noqa: E402
 from bmk.api import TOKEN_HEADER, create_app  # noqa: E402
 from bmk.ingest import cloudtabs as ct  # noqa: E402
 
@@ -151,3 +152,12 @@ def test_add_url(client):
     assert r.json()["outcome"] == "new"
     bad = client.post("/api/bookmarks", json={"url": "javascript:alert(1)"}, headers=client.headers_w)
     assert bad.status_code == 400
+
+
+def test_scan_log_returns_the_tail(client, tmp_path, monkeypatch):
+    log = tmp_path / "cloudtabs.log"
+    monkeypatch.setattr(launchd, "LOG_PATH", log)
+    assert client.get("/api/log").json() == {"path": str(log), "exists": False, "lines": []}
+    log.write_text("".join(f"run {i}\n" for i in range(1, 301)))
+    body = client.get("/api/log", params={"lines": 3}).json()
+    assert body["exists"] and body["lines"] == ["run 298", "run 299", "run 300"]

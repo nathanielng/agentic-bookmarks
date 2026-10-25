@@ -488,7 +488,23 @@ async function loadHealth() {
       el("span", { class: "pill" }, c.status.toUpperCase()), el("strong", {}, c.name), el("div", {}, c.detail),
       c.fix && c.status !== "ok" ? el("pre", {}, c.fix) : null,
     ))),
+    el("h3", {}, "Background scan log"),
+    el("div", { class: "inline" }, el("button", { onclick: () => loadLog().catch(showError) }, "Show log")),
+    el("div", { id: "scan-log" }),
   );
+}
+
+async function loadLog() {
+  const log = await api("GET", "/api/log?lines=200");
+  const box = $("#scan-log");
+  if (!log.exists) {
+    fill(box, el("p", { class: "muted" }, `No log yet at ${log.path}. It appears after the first background scan.`));
+    return;
+  }
+  const pre = el("pre", { class: "log" }, log.lines.join("\n") || "(empty)");
+  fill(box, el("p", { class: "muted" }, `Last ${log.lines.length} lines of ${log.path}, newest at the bottom.`), pre);
+  pre.scrollTop = pre.scrollHeight;
+  box.previousElementSibling.querySelector("button").textContent = "Refresh log";
 }
 
 // ------------------------------------------------------------------ wiring

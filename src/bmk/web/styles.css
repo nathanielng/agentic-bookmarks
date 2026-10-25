@@ -139,6 +139,7 @@ main h2 { font-size: 15px; }
 .checks strong { margin: 0 8px; }
 .checks div { color: var(--muted); margin: 4px 0 0 64px; }
 .checks pre { margin: 6px 0 0 64px; }
+pre.log { max-height: 420px; overflow: auto; }
 .pill { display: inline-block; width: 52px; text-align: center; border-radius: 10px; font-size: 11px; font-weight: 700; padding: 1px 0; }
 .check-ok .pill { background: var(--ok); color: var(--bg); }
 .check-warn .pill { background: var(--warn-fg); color: var(--bg); }

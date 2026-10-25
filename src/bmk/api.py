@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__, doctor
+from . import __version__, doctor, launchd
 from . import db as dbmod
 from .config import Config, get_config
 from .ingest.cloudtabs import CloudTabsError, CloudTabsPermissionDenied, run_import
@@ -133,6 +133,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.get("/api/doctor")
     def health_checks() -> list[dict[str, Any]]:
         return [c.as_dict() for c in doctor.run_checks(config)]
+
+    @app.get("/api/log")
+    def scan_log(lines: int = 200) -> dict[str, Any]:
+        return launchd.read_log(max(1, min(lines, 2000)))
 
     @app.get("/api/export")
     def export() -> JSONResponse:

@@ -81,6 +81,18 @@ def uninstall(run: Runner = _run, plist_path: Path | None = None) -> None:
     (plist_path or PLIST_PATH).unlink(missing_ok=True)
 
 
+def read_log(lines: int = 200, path: Path | None = None) -> dict:
+    """The last `lines` lines of the agent's log (it can grow for months, so only the tail is read)."""
+    path = path or LOG_PATH
+    if not path.exists():
+        return {"path": str(path), "exists": False, "lines": []}
+    with path.open("rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(max(0, size - 256 * 1024))
+        tail = f.read().decode("utf-8", errors="replace").splitlines()
+    return {"path": str(path), "exists": True, "lines": tail[-lines:]}
+
+
 def status(run: Runner = _run, plist_path: Path | None = None) -> AgentStatus:
     plist_path = plist_path or PLIST_PATH
     installed = plist_path.exists()
