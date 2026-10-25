@@ -119,7 +119,7 @@ def add(
 def list_cmd(
     limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
     offset: int = 0,
-    view: Annotated[str, typer.Option(help="active | trash | date_unknown | all")] = "active",
+    view: Annotated[str, typer.Option(help="active | inbox | kept | trash | date_unknown | all")] = "active",
     source: Annotated[Optional[str], typer.Option(help="Filter by source type, e.g. cloudtabs.")] = None,
     device: Annotated[Optional[str], typer.Option(help="Filter by source ref, e.g. a device name.")] = None,
     as_json: Annotated[bool, typer.Option("--json")] = False,
@@ -192,7 +192,7 @@ def edit(
     url: Annotated[Optional[str], typer.Option()] = None,
     remarks: Annotated[Optional[str], typer.Option()] = None,
     saved_at: Annotated[Optional[str], typer.Option(help="ISO-8601, e.g. 2026-10-01T09:00+08:00")] = None,
-    status: Annotated[Optional[str], typer.Option(help="inbox | read | archived")] = None,
+    status: Annotated[Optional[str], typer.Option(help="inbox | kept")] = None,
 ) -> None:
     """Edit fields. Edited fields are locked against automatic overwrites."""
     try:
@@ -212,6 +212,18 @@ def rm(bookmark_ids: list[int]) -> None:
         except NotFound as exc:
             _fail(str(exc))
         console.print(f"deleted #{bookmark_id}")
+
+
+@app.command()
+def keep(bookmark_ids: list[int]) -> None:
+    """Keep bookmarks: take them out of the Inbox into Kept."""
+    lib = _lib()
+    for bookmark_id in bookmark_ids:
+        try:
+            lib.update(bookmark_id, status="kept")
+        except NotFound as exc:
+            _fail(str(exc))
+        console.print(f"kept #{bookmark_id}")
 
 
 @app.command()

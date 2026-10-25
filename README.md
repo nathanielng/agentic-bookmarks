@@ -25,8 +25,13 @@ python -m pytest
 bmk serve --open                # http://127.0.0.1:8765/ (BMK_PORT to change)
 ```
 
-Smart lists (All, Inbox, Date unknown, Deleted but saved again, Trash), per-device filters, search,
-sorting, inline edit (double-click a title or remark; edits are locked 🔒), status, bulk actions,
+**Triage:** everything new lands in the **Inbox**. Each row has **✓ Keep** (moves it to **Kept**) and
+**🗑 Trash**; both have Undo, and Trash → Restore works any time. Keys: ↓ ↑ move, K keep, D trash,
+O open, Enter details. A bookmark is stored in the local library as soon as it is scanned, so closing
+the tab on your phone never loses it.
+
+Also: lists (Inbox, Kept, All, Date unknown, Deleted but saved again, Trash), per-device filters, search,
+sorting, inline edit (double-click a title or remark; edits are locked 🔒), bulk actions,
 delete with Undo, a detail pane (URLs, aliases, sources, history, set the saved date), import runs with
 per-item outcomes, and a Health panel. The server listens on 127.0.0.1 only and every write needs the
 token in `~/Library/Application Support/bmk/token`, which the served page carries.
@@ -66,10 +71,11 @@ bmk ingest cloudtabs                      # import open iCloud tabs (idempotent;
 bmk ingest cloudtabs --exclude-device "My MacBook" --dry-run
 bmk add https://example.com --title "Example" --remarks "why I saved it"
 bmk list                                  # newest first; ~ = approximate date, — = unknown
-bmk list --view trash | date_unknown | all
+bmk list --view inbox | kept | trash | date_unknown | all
 bmk search "bedrock agents"
 bmk show 12
 bmk edit 12 --title "Better title" --saved-at 2026-10-01T09:00+08:00   # edited fields are locked
+bmk keep 12                               # Inbox → Kept
 bmk rm 12 && bmk restore 12               # soft delete / Trash
 bmk runs                                  # import history; `bmk runs <id>` for per-item outcomes
 bmk export -o backup.json                 # full backup

@@ -41,6 +41,9 @@ def connect(db_path: Path | str, *, migrate: bool = True) -> sqlite3.Connection:
     return conn
 
 
+FK_OFF_MARKER = "-- bmk: foreign_keys=off"
+
+
 def schema_version(conn: sqlite3.Connection) -> int:
     return conn.execute("PRAGMA user_version").fetchone()[0]
 
@@ -52,13 +55,25 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
         if version <= current:
             continue
         log.info("Applying migration %s", name)
+        # A migration that rebuilds a referenced table asks for foreign keys off (they can only be toggled
+        # outside a transaction); every reference is then checked before COMMIT instead.
+        fk_off = FK_OFF_MARKER in sql
+        if fk_off:
+            conn.execute("PRAGMA foreign_keys = OFF")
         # executescript() commits any open transaction; wrap the script so it is all-or-nothing.
         try:
-            conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
+            conn.executescript(f"BEGIN;\n{sql}")
+            if broken := conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise sqlite3.IntegrityError(f"migration {name} broke foreign keys: {broken[:5]}")
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.execute("COMMIT")
         except sqlite3.Error:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
             raise
+        finally:
+            if fk_off:
+                conn.execute("PRAGMA foreign_keys = ON")
         applied.append(version)
     return applied
 

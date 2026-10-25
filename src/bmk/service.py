@@ -36,7 +36,7 @@ BACKUP_TABLES = (
 _SELECT_BOOKMARK = "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url FROM bookmarks b"
 
 # Smart lists available so far; Unprocessed, Failed, Duplicates and Categories arrive with CG3/CG5.
-VIEWS = ("active", "inbox", "date_unknown", "resaved", "trash")
+VIEWS = ("inbox", "kept", "active", "date_unknown", "resaved", "trash")
 SORTS = {"saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
 
 
@@ -418,6 +418,8 @@ class Library:
             return [*live, "b.deleted_at IS NULL"], []
         if view == "inbox":
             return [*live, "b.deleted_at IS NULL", "b.status = 'inbox'"], []
+        if view == "kept":
+            return [*live, "b.deleted_at IS NULL", "b.status = 'kept'"], []
         if view == "trash":
             return [*live, "b.deleted_at IS NOT NULL"], []
         if view == "date_unknown":

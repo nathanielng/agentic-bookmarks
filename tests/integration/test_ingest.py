@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -158,7 +159,7 @@ def test_status_validation(lib):
     bid = lib.list()[0]["id"]
     with pytest.raises(ValueError):
         lib.update(bid, status="bogus")
-    assert lib.update(bid, status="read")["status"] == "read"
+    assert lib.update(bid, status="kept")["status"] == "kept"
 
 
 def test_search(lib):
@@ -207,4 +208,36 @@ def test_migrations_idempotent(config):
     conn = db.connect(config.db_path)
     assert db.schema_version(conn) == db.latest_version()
     assert db.apply_migrations(conn) == []
+    conn.close()
+
+
+def test_migration_002_maps_old_statuses_to_kept(tmp_path):
+    path = tmp_path / "v1.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(db._migrations()[0][2] + "\nPRAGMA user_version = 1;")
+    now = "2026-10-25T00:00:00Z"
+    for i, status in enumerate(["inbox", "read", "archived"], 1):
+        conn.execute(
+            "INSERT INTO bookmarks (id, url_original, url_canonical, title, imported_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (i, f"https://e.com/{i}", f"https://e.com/{i}", f"zebra {status}", now, now, status),
+        )
+        conn.execute(
+            "INSERT INTO sources (bookmark_id, source_type, raw_url, first_seen_at, last_seen_at) VALUES (?, 'x', ?, ?, ?)",
+            (i, f"https://e.com/{i}", now, now),
+        )
+    conn.commit()
+    conn.close()
+
+    conn = db.connect(path)
+    assert db.schema_version(conn) == db.latest_version()
+    assert dict(conn.execute("SELECT id, status FROM bookmarks").fetchall()) == {1: "inbox", 2: "kept", 3: "kept"}
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert conn.execute("SELECT count(*) FROM sources").fetchone()[0] == 3
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE bookmarks SET status = 'read' WHERE id = 1")
+    lib = Library(conn)
+    assert {b["id"] for b in lib.search("zebra")} == {1, 2, 3}  # FTS index rebuilt
+    lib.update(1, title="giraffe")
+    assert [b["id"] for b in lib.search("giraffe")] == [1]  # FTS triggers recreated
+    assert lib.count("kept") == 2 and lib.count("inbox") == 1
     conn.close()

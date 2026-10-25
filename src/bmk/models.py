@@ -55,4 +55,5 @@ class ImportSummary:
 
 
 EDITABLE_FIELDS = ("title", "url", "remarks", "saved_at", "status")
-STATUSES = ("inbox", "read", "archived")
+# Triage: everything new lands in the Inbox until it is kept (or moved to Trash, which is deleted_at).
+STATUSES = ("inbox", "kept")

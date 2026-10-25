@@ -4,8 +4,9 @@
 const TOKEN = document.querySelector('meta[name="bmk-token"]').content;
 const APPROXIMATE = new Set(["first_seen_initial", "file_birthtime", "file_mtime"]);
 const VIEW_LABELS = {
-  active: "All",
   inbox: "Inbox",
+  kept: "Kept",
+  active: "All",
   date_unknown: "Date unknown",
   resaved: "Deleted but saved again",
   trash: "Trash",
@@ -13,7 +14,7 @@ const VIEW_LABELS = {
 
 const state = {
   panel: "bookmarks",
-  view: "active",
+  view: "inbox",
   q: "",
   source: null, // {source_type, source_ref}
   sort: "saved_at",
@@ -24,6 +25,7 @@ const state = {
   total: 0,
   selected: new Set(),
   detailId: null,
+  cursor: -1, // keyboard-selected row on this page
   tz: "UTC",
 };
 
@@ -234,27 +236,49 @@ function startEdit(td, item, field) {
   input.select();
 }
 
-function statusCell(item) {
-  const select = el("select", {
-    "aria-label": "Status",
-    onclick: (e) => e.stopPropagation(),
-    onchange: async (e) => {
-      try {
-        await api("PATCH", `/api/bookmarks/${item.id}`, { status: e.target.value });
-        await refresh();
-      } catch (err) {
-        showError(err);
-      }
-    },
-  }, ...["inbox", "read", "archived"].map((s) => el("option", { value: s, selected: s === item.status }, s)));
-  return el("td", { class: "status" }, select);
+const SVG_NS = "http://www.w3.org/2000/svg";
+function icon(...paths) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of Object.entries({ viewBox: "0 0 24 24", width: "15", height: "15", fill: "none", stroke: "currentColor",
+    "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", class: "icon" })) svg.setAttribute(k, v);
+  for (const d of paths) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+const trashIcon = () => icon("M3 6h18", "M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2", "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", "M10 11v6", "M14 11v6");
+const keepIcon = () => icon("M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", "M8 12.5l2.5 2.5L16 9.5");
+
+// Row actions: Keep (Inbox → Kept, or back) and Trash, or Restore when the bookmark is in Trash.
+function actionButtons(item) {
+  if (item.deleted_at) {
+    return [el("button", { class: "link", title: "Restore from Trash", onclick: (e) => { e.stopPropagation(); restoreOne(item.id); } }, "Restore")];
+  }
+  const kept = item.status === "kept";
+  return [
+    el("button", {
+      class: `link icon-button keep${kept ? " on" : ""}`,
+      title: kept ? "Kept. Click to move back to the Inbox" : "Keep (K): move from the Inbox to Kept",
+      "aria-label": kept ? "Move back to Inbox" : "Keep",
+      "aria-pressed": kept ? "true" : "false",
+      onclick: (e) => { e.stopPropagation(); setKept(item.id, !kept); },
+    }, keepIcon()),
+    el("button", {
+      class: "link danger icon-button",
+      title: "Move to Trash (D). Undo is available",
+      "aria-label": "Move to Trash",
+      onclick: (e) => { e.stopPropagation(); deleteOne(item.id); },
+    }, trashIcon()),
+  ];
 }
 
 function renderRows() {
   const tbody = $("#rows");
-  const inTrash = state.view === "trash" || state.view === "resaved";
   if (!state.items.length) {
-    tbody.replaceChildren(el("tr", {}, el("td", { colspan: 8, class: "empty" }, state.q ? "No matches." : "Nothing here yet.")));
+    const empty = state.q ? "No matches." : state.view === "inbox" ? "Inbox is empty. Everything has been kept or trashed." : "Nothing here yet.";
+    tbody.replaceChildren(el("tr", {}, el("td", { colspan: 7, class: "empty" }, empty)));
   } else {
     tbody.replaceChildren(...state.items.map((item) => {
       const href = safeHref(item.url);
@@ -272,22 +296,18 @@ function renderRows() {
           renderBulkbar();
         },
       });
-      const action = inTrash
-        ? el("button", { class: "link", title: "Restore", onclick: (e) => { e.stopPropagation(); restoreOne(item.id); } }, "Restore")
-        : el("button", { class: "link danger", title: "Delete (undo available)", onclick: (e) => { e.stopPropagation(); deleteOne(item.id); } }, "Delete");
       return el("tr", {
         "data-id": item.id,
         class: item.id === state.detailId ? "selected" : "",
-        onclick: () => openDetail(item.id),
+        onclick: () => { state.cursor = state.items.indexOf(item); markCursor(); openDetail(item.id); },
       },
         el("td", { class: "check" }, check),
         el("td", { class: "date", title: item.saved_at_source }, fmtDate(item.saved_at, item.saved_at_source), lockMark(item, "saved_at")),
         editableCell(item, "title", title, open),
         el("td", { class: "domain" }, item.domain || ""),
-        statusCell(item),
         el("td", { class: "sources" }, ...item.source_labels.map((s) => el("span", { class: "badge" }, s))),
         editableCell(item, "remarks", item.remarks || ""),
-        el("td", { class: "actions" }, action),
+        el("td", { class: "actions" }, ...actionButtons(item)),
       );
     }));
   }
@@ -300,7 +320,50 @@ function renderRows() {
     th.dataset.dir = th.dataset.sort === state.sort ? (state.desc ? "desc" : "asc") : "";
   }
   $("#select-all").checked = state.items.length > 0 && state.items.every((i) => state.selected.has(i.id));
+  state.cursor = Math.min(state.cursor, state.items.length - 1);
+  markCursor();
   renderBulkbar();
+}
+
+function markCursor() {
+  const rows = document.querySelectorAll("#rows tr[data-id]");
+  rows.forEach((tr, i) => tr.classList.toggle("cursor", i === state.cursor));
+  rows[state.cursor]?.scrollIntoView({ block: "nearest" });
+}
+
+// Keyboard triage: ↓/↑ move, K keeps, D trashes, O opens the page, Enter shows details.
+function triageKey(e) {
+  if (state.panel !== "bookmarks" || e.metaKey || e.ctrlKey || e.altKey) return false;
+  const item = state.items[state.cursor];
+  switch (e.key) {
+    case "ArrowDown":
+    case "ArrowUp":
+      state.cursor = Math.max(0, Math.min(state.items.length - 1, state.cursor + (e.key === "ArrowDown" ? 1 : -1)));
+      markCursor();
+      if (!$("#detail").hidden && state.items[state.cursor]) openDetail(state.items[state.cursor].id);
+      return true;
+    case "k":
+    case "K":
+      if (item && !item.deleted_at) setKept(item.id, item.status !== "kept");
+      return Boolean(item);
+    case "d":
+    case "D":
+    case "Delete":
+    case "Backspace":
+      if (item && !item.deleted_at) deleteOne(item.id);
+      return Boolean(item);
+    case "o":
+    case "O": {
+      const href = item && safeHref(item.url);
+      if (href) window.open(href, "_blank", "noopener,noreferrer");
+      return Boolean(href);
+    }
+    case "Enter":
+      if (item) openDetail(item.id);
+      return Boolean(item);
+    default:
+      return false;
+  }
 }
 
 function renderBulkbar() {
@@ -327,6 +390,8 @@ async function bulk(spec) {
     state.selected.clear();
     if (action === "delete") {
       toast(`${ids.length} moved to Trash`, { label: "Undo", run: () => api("POST", "/api/bookmarks/bulk", { ids, action: "restore" }).then(refresh) });
+    } else if (spec === "status:kept") {
+      toast(`${ids.length} kept`, { label: "Undo", run: () => api("POST", "/api/bookmarks/bulk", { ids, action: "status", status: "inbox" }).then(refresh) });
     } else {
       toast(`${ids.length} updated`);
     }
@@ -334,6 +399,24 @@ async function bulk(spec) {
     showError(err);
   }
   await refresh();
+}
+
+async function setKept(id, kept) {
+  try {
+    await api("PATCH", `/api/bookmarks/${id}`, { status: kept ? "kept" : "inbox" });
+    toast(kept ? "Kept" : "Moved back to the Inbox", { label: "Undo", run: () => setKept(id, !kept) });
+  } catch (err) {
+    showError(err);
+  }
+  await refresh();
+  await followDetail(id);
+}
+
+// After a triage action: keep showing the bookmark if it is still listed, otherwise move on to the next one.
+async function followDetail(id) {
+  if ($("#detail").hidden) return;
+  const next = state.items.some((i) => i.id === id) ? id : state.items[state.cursor]?.id;
+  return next ? openDetail(next) : closeDetail();
 }
 
 async function deleteOne(id) {
@@ -344,6 +427,7 @@ async function deleteOne(id) {
     showError(err);
   }
   await refresh();
+  await followDetail(id);
 }
 
 async function restoreOne(id) {
@@ -406,9 +490,13 @@ async function openDetail(id) {
     el("div", { class: "detail-actions" },
       href ? el("a", { class: "button", href, target: "_blank", rel: "noopener noreferrer" }, "Open") : null,
       el("button", { onclick: () => navigator.clipboard.writeText(b.url).then(() => toast("URL copied")) }, "Copy URL"),
+      b.deleted_at ? null
+        : b.status === "kept"
+          ? el("button", { class: "keep on", title: "Move back to the Inbox", onclick: () => setKept(id, false) }, keepIcon(), " Kept")
+          : el("button", { class: "keep", onclick: () => setKept(id, true) }, keepIcon(), " Keep"),
       b.deleted_at
         ? el("button", { onclick: () => restoreOne(id).then(() => openDetail(id)) }, "Restore")
-        : el("button", { class: "danger", onclick: () => deleteOne(id).then(closeDetail) }, "Delete"),
+        : el("button", { class: "danger", onclick: () => deleteOne(id) }, trashIcon(), " Move to Trash"),
     ),
     b.deleted_at ? el("p", { class: "warn" }, `In Trash since ${fmtDate(b.deleted_at)}. It stays deleted even if the tab is seen again.`) : null,
     row("URL", el("a", { href, target: "_blank", rel: "noopener noreferrer" }, b.url)),
@@ -419,7 +507,6 @@ async function openDetail(id) {
       el("div", { class: "inline" }, dateInput,
         el("button", { onclick: () => dateInput.value && save({ saved_at: new Date(dateInput.value).toISOString() }) }, "Set")),
     ),
-    row("Status", b.status),
     row("Locked", b.locked_fields.length ? b.locked_fields.join(", ") : "—"),
     row("Remarks", remarks, el("button", { onclick: () => save({ remarks: remarks.value }) }, "Save remarks")),
     el("h3", {}, `Sources (${b.sources.length})`),
@@ -551,7 +638,9 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     $("#search").focus();
   }
-  if (e.key === "Escape" && !$("#detail").hidden && document.activeElement.tagName !== "INPUT") closeDetail();
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+  if (e.key === "Escape" && !$("#detail").hidden && !typing) closeDetail();
+  if (!typing && triageKey(e)) e.preventDefault();
 });
 $("#scan").addEventListener("click", scan);
 $("#prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); refresh(); });

@@ -31,10 +31,9 @@
       <section id="panel-bookmarks">
         <div id="bulkbar" class="bulkbar" hidden>
           <span id="bulkcount"></span>
-          <button data-bulk="status:read">Mark read</button>
-          <button data-bulk="status:archived">Archive</button>
-          <button data-bulk="status:inbox">Back to inbox</button>
-          <button data-bulk="delete" class="danger">Delete</button>
+          <button data-bulk="status:kept">Keep</button>
+          <button data-bulk="status:inbox">Back to Inbox</button>
+          <button data-bulk="delete" class="danger">Move to Trash</button>
           <button data-bulk="restore" class="trash-only">Restore</button>
           <button data-bulk="clear" class="link">Clear selection</button>
         </div>
@@ -45,7 +44,6 @@
               <th data-sort="saved_at">Saved at</th>
               <th data-sort="title">Title</th>
               <th data-sort="domain">Domain</th>
-              <th data-sort="status">Status</th>
               <th>Sources</th>
               <th>Remarks</th>
               <th class="actions"></th>
@@ -57,7 +55,7 @@
           <button id="prev">‹ Prev</button>
           <span id="pageinfo"></span>
           <button id="next">Next ›</button>
-          <span class="hint">Double-click a title or remark to edit. Edited fields are locked 🔒 against automatic updates.</span>
+          <span class="hint">Keys: ↓ ↑ move · K keep · D trash · O open · Enter details. Double-click a title or remark to edit (edits are locked 🔒).</span>
         </div>
       </section>
       <section id="panel-runs" hidden></section>

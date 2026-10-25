@@ -91,9 +91,10 @@ def test_bulk_actions(client, cloudtabs):
         cloudtabs.open_tab(f"T{n}", f"https://example.com/{n}", f"Page {n}")
     scan(client)
     ids = [i["id"] for i in client.get("/api/bookmarks").json()["items"]]
-    r = client.post("/api/bookmarks/bulk", json={"ids": ids[:2], "action": "status", "status": "read"}, headers=client.headers_w)
+    r = client.post("/api/bookmarks/bulk", json={"ids": ids[:2], "action": "status", "status": "kept"}, headers=client.headers_w)
     assert r.status_code == 200
-    assert client.get("/api/meta").json()["counts"]["inbox"] == 1
+    counts = client.get("/api/meta").json()["counts"]
+    assert counts["inbox"] == 1 and counts["kept"] == 2
     client.post("/api/bookmarks/bulk", json={"ids": ids, "action": "delete"}, headers=client.headers_w)
     assert client.get("/api/meta").json()["counts"]["trash"] == 3
     bad = client.post("/api/bookmarks/bulk", json={"ids": ids, "action": "explode"}, headers=client.headers_w)
