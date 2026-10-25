@@ -426,6 +426,12 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
                                       payload.get("min_confidence"), new_values)  # fmt: skip
             return {"changed": count, "changeset": changesets.get(lib, changeset_id)}
 
+    @app.post("/api/changesets/{changeset_id}/items/{item_id}/trash")
+    def changeset_item_trash(changeset_id: int, item_id: int) -> dict[str, Any]:
+        """Move the proposal's bookmark to Trash and drop the proposal; returns the bookmark id (for Undo → restore)."""
+        with library() as lib:
+            return {"bookmark_id": changesets.trash_item(lib, changeset_id, item_id)}
+
     @app.post("/api/changesets/{changeset_id}/apply")
     def changeset_apply(changeset_id: int) -> dict[str, Any]:
         with library() as lib:

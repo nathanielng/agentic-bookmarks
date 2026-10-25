@@ -168,6 +168,19 @@ def decide(lib: Library, changeset_id: int, decision: str, item_ids: list[int] |
     return cur.rowcount
 
 
+def trash_item(lib: Library, changeset_id: int, item_id: int) -> int:
+    """The person doesn't want this bookmark at all: move it to Trash (restorable) and drop its proposal. Not logged
+    as a review decision, since it says nothing about the classifier."""
+    item = lib.conn.execute("SELECT bookmark_id, decision FROM changeset_items WHERE id=? AND changeset_id=?", (item_id, changeset_id)).fetchone()
+    if item is None or item["bookmark_id"] is None:
+        raise NotFound(f"item {item_id} not found in changeset {changeset_id}")
+    if item["decision"] in ("applied", "reverted"):
+        raise Conflict("that proposal was already applied; move the bookmark to Trash from the list instead")
+    lib.delete(item["bookmark_id"])
+    lib.conn.execute("UPDATE changeset_items SET decision='rejected', decided_at=?, result='moved to Trash' WHERE id=?", (now_utc(), item_id))
+    return item["bookmark_id"]
+
+
 def auto_apply(lib: Library, changeset_id: int, min_confidence: float) -> dict[str, int]:
     """Approve every pending item at or above `min_confidence` (logged as auto) and apply them; the rest
     stay pending for a person. Returns {approved, applied, conflicts, left}."""

@@ -548,3 +548,20 @@ def test_the_rule_never_overrides_a_person(lib, config):
     changesets.decide(lib, cs_id, "rejected", item_ids=[item["id"]])
     assert changesets.auto_apply(lib, cs_id, 0.9)["approved"] == 1  # the other confident one
     assert [i["decision"] for i in changesets.get(lib, cs_id)["items"] if i["id"] == item["id"]] == ["rejected"]
+
+
+def test_trashing_a_proposal_moves_the_bookmark_to_trash_without_logging(lib, config):
+    ids = seed(lib, 3)
+    make_categories(lib)
+    cs_id = categorize.run(lib, config, choose=by_topic).changeset_id
+    item = changesets.get(lib, cs_id)["items"][0]
+    assert changesets.trash_item(lib, cs_id, item["id"]) == item["bookmark_id"]
+    assert lib.get(item["bookmark_id"])["deleted_at"] is not None
+    after = next(i for i in changesets.get(lib, cs_id)["items"] if i["id"] == item["id"])
+    assert (after["decision"], after["result"]) == ("rejected", "moved to Trash")
+    assert lib.conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0] == 0
+    changesets.decide(lib, cs_id, "approved")
+    assert changesets.apply(lib, cs_id)["applied"] == 2  # the trashed one is not applied
+    with pytest.raises(Conflict):
+        changesets.trash_item(lib, cs_id, next(i["id"] for i in changesets.get(lib, cs_id)["items"] if i["decision"] == "applied"))
+    assert ids

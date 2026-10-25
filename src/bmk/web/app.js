@@ -1183,6 +1183,17 @@ async function changesetView(id) {
   );
 }
 
+async function trashItem(cs, item) {
+  try {
+    const { bookmark_id } = await api("POST", `/api/changesets/${cs.id}/items/${item.id}/trash`);
+    toast("Moved to Trash", { label: "Undo", run: () => api("POST", `/api/bookmarks/${bookmark_id}/restore`).then(() => loadReview()) });
+    await loadReview();
+    await loadMeta();
+  } catch (err) {
+    showError(err);
+  }
+}
+
 function itemRow(cs, item, open, decide) {
   const editable = open && !["applied", "reverted"].includes(item.decision);
   let subject, change;
@@ -1213,10 +1224,11 @@ function itemRow(cs, item, open, decide) {
     el("td", {}, el("span", { class: `cs-status ${item.decision}` }, DECISION_LABELS[item.decision] || item.decision)),
     el("td", {}, subject), el("td", {}, change),
     el("td", { class: item.confidence !== null && item.confidence < 0.6 ? "low" : "" }, conf),
-    el("td", { class: "muted" }, item.result && item.decision === "conflict" ? item.result : item.rationale || ""),
+    el("td", { class: "muted" }, item.result && ["conflict", "rejected"].includes(item.decision) ? item.result : item.rationale || ""),
     el("td", { class: "actions" }, editable ? [
       el("button", { class: `link${item.decision === "approved" ? " on" : ""}`, onclick: () => decide("approved", { item_ids: [item.id] }) }, "Approve"),
-      el("button", { class: "link danger", onclick: () => decide("rejected", { item_ids: [item.id] }) }, "Reject"),
+      el("button", { class: "link", title: "Leave it uncategorised", onclick: () => decide("rejected", { item_ids: [item.id] }) }, "Reject"),
+      item.bookmark_id ? el("button", { class: "link danger", title: "Move the bookmark to Trash (restorable)", onclick: () => trashItem(cs, item) }, "Trash") : null,
     ] : null),
   );
 }
