@@ -1,0 +1,38 @@
+[project]
+name = "bmk"
+version = "0.1.0"
+description = "Local-first macOS bookmarks manager with AI agent support"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "tldextract>=5.1",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.115", "uvicorn>=0.30"]
+enrich = ["httpx>=0.27", "trafilatura>=1.12", "selectolax>=0.3", "tenacity>=9.0"]
+files = ["openpyxl>=3.1", "markdown-it-py>=3.0"]
+macos = ["pyobjc-framework-Cocoa>=10.3"]
+ai = ["boto3>=1.35", "anthropic>=0.40", "mcp>=1.2"]
+browser = ["playwright>=1.48"]
+gmail = ["google-api-python-client>=2.150", "google-auth-oauthlib>=1.2"]
+dev = ["pytest>=8.3", "respx>=0.21"]
+
+[project.scripts]
+bmk = "bmk.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bmk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

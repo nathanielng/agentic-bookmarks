@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# Local config and data — never commit
+.env
+*.db
+*.db-wal
+*.db-shm
+!tests/fixtures/*.db
+backup*.json
+chrome-profile/
+
+# macOS
+.DS_Store
+
+# Personal helpers
+claude_resume.sh
+
+# Planning history: only the original brief (PLAN00) and the consolidated plan (PLAN05 onwards) are committed
+planning/PLAN0[1-4]*.md

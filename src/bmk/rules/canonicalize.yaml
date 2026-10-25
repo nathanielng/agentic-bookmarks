@@ -1,0 +1,87 @@
+# URL canonicalisation rules (PLAN05 §6.3). Conservative: only strip what is known to be noise.
+# Changing these rules later requires `bmk dedupe recanonicalise` (CG5).
+
+# Query parameters stripped on every domain. Entries ending in '*' are prefixes.
+tracking_params:
+  - utm_*
+  - fbclid
+  - gclid
+  - dclid
+  - gbraid
+  - wbraid
+  - msclkid
+  - mc_cid
+  - mc_eid
+  - igshid
+  - ref_src
+  - _hsenc
+  - _hsmi
+  - mkt_tok
+  - yclid
+  - __s
+
+# Extra tracking parameters per registrable domain.
+domain_tracking_params:
+  x.com: [s, t, ref_url]
+  youtube.com: [si, feature, pp]
+  spotify.com: [si, nd]
+  linkedin.com: [trk, trackingId, rcm, lipi, midToken, midSig, trkEmail, eid, otpToken, originalSubdomain]
+  instagram.com: [igsh, img_index]
+  facebook.com: [mibextid, rdid, share_url]
+  substack.com: [r, triedRedirect, showWelcome]
+  medium.com: [source, sk]
+  reddit.com: [share_id, utm_name, rdt]
+
+# Hostname rewrites (exact host match, after lowercasing).
+host_aliases:
+  twitter.com: x.com
+  www.twitter.com: x.com
+  mobile.twitter.com: x.com
+  mobile.x.com: x.com
+  m.youtube.com: youtube.com
+  m.facebook.com: facebook.com
+  mobile.facebook.com: facebook.com
+  m.reddit.com: reddit.com
+  old.reddit.com: reddit.com
+  new.reddit.com: reddit.com
+  m.imdb.com: imdb.com
+
+# Wikipedia-style mobile hosts: <lang>.m.<domain> -> <lang>.<domain>
+mobile_subdomain_domains:
+  - wikipedia.org
+  - wiktionary.org
+  - wikimedia.org
+
+# 'www.' is stripped unless the registrable domain is listed here.
+keep_www_domains: []
+
+# Fragments are kept by default. They are dropped on these registrable domains.
+drop_fragment_domains:
+  - x.com
+  - linkedin.com
+  - instagram.com
+  - youtube.com
+  - medium.com
+
+# Query parameters that identify content; never dropped by the loose (tier 3) key.
+significant_params_default: [id, p, v, q, page, list]
+domain_significant_params:
+  news.ycombinator.com: [id]
+  youtube.com: [v, list, t]
+  google.com: [q, tbm]
+
+# Known URL shorteners (resolved in CG3).
+shorteners:
+  - lnkd.in
+  - t.co
+  - bit.ly
+  - buff.ly
+  - ow.ly
+  - tinyurl.com
+  - dlvr.it
+  - trib.al
+  - rb.gy
+  - shorturl.at
+  - goo.gl
+  - is.gd
+  - youtu.be
