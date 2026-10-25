@@ -117,11 +117,11 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
         return {"ok": True, "version": __version__}
 
     @app.get("/api/meta")
-    def meta(view: str = "active", source_type: str | None = None, source_ref: str | None = None) -> dict[str, Any]:
+    def meta(view: str = "active", source_type: str | None = None, source_ref: str | None = None, q: str | None = None) -> dict[str, Any]:
         """Sidebar data. List counts are within the selected source, source counts within the selected list."""
         with library() as lib:
             return {
-                "counts": lib.view_counts(source_type, source_ref),
+                "counts": lib.view_counts(source_type, source_ref, q),
                 "sources": lib.source_refs(view),
                 "last_cloudtabs_run": lib.last_run("cloudtabs"),
                 "statuses": list(STATUSES),

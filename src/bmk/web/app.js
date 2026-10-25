@@ -83,6 +83,17 @@ function fmtDate(iso, source = "exact") {
   return APPROXIMATE.has(source) ? `~${text}` : text;
 }
 
+// "https://www.example.com/a/very/long/path?x=1" → "example.com/…/long/path?x=1": the site stays readable, the middle goes.
+function shortUrl(url, max = 38) {
+  let s = (url || "").replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
+  if (s.length <= max) return s;
+  const slash = s.indexOf("/");
+  const host = slash === -1 ? s : s.slice(0, slash);
+  const keepHost = host.length > max / 2 ? host.slice(0, Math.floor(max / 2)) : host;
+  const tail = max - keepHost.length - 2;
+  return `${keepHost}/…${tail > 3 ? s.slice(-tail) : ""}`;
+}
+
 function fallbackTitle(url) {
   try {
     const u = new URL(url);
@@ -139,8 +150,10 @@ async function loadMeta() {
     params.set("source_type", state.source.source_type);
     if (state.source.source_ref) params.set("source_ref", state.source.source_ref);
   }
+  if (state.q) params.set("q", state.q);
   const meta = await api("GET", `/api/meta?${params}`);
   state.tz = meta.display_tz || "UTC";
+  state.counts = meta.counts; // with a search active: matches per list
   const views = $("#views");
   views.replaceChildren(
     ...Object.entries(VIEW_LABELS).map(([view, label]) =>
@@ -343,7 +356,13 @@ function actionButtons(item) {
 function renderRows() {
   const tbody = $("#rows");
   if (!state.items.length) {
-    const empty = state.q ? "No matches." : state.view === "inbox" ? "Inbox is empty. Everything has been kept or trashed." : "Nothing here yet.";
+    const elsewhere = state.q
+      ? Object.entries(state.counts || {}).filter(([view, n]) => n > 0 && view !== state.view && VIEW_LABELS[view])
+      : [];
+    const empty = state.q
+      ? [`No matches in ${VIEW_LABELS[state.view] || state.view}.`, elsewhere.length ? " Found in: " : "",
+        ...elsewhere.flatMap(([view, n], i) => [i ? ", " : "", el("a", { href: "#", onclick: (e) => { e.preventDefault(); selectView(view); } }, `${VIEW_LABELS[view]} (${n})`)])]
+      : state.view === "inbox" ? "Inbox is empty. Everything has been kept or trashed." : "Nothing here yet.";
     tbody.replaceChildren(el("tr", {}, el("td", { colspan: 8, class: "empty" }, empty)));
   } else {
     tbody.replaceChildren(...state.items.map((item) => {
@@ -371,7 +390,7 @@ function renderRows() {
         el("td", { class: "date", title: item.saved_at_source }, fmtDate(item.saved_at, item.saved_at_source), lockMark(item, "saved_at")),
         editableCell(item, "title", title, open, fetchMark(item),
           item.description ? el("div", { class: "desc", title: item.description }, item.description) : null),
-        el("td", { class: "domain" }, item.domain || ""),
+        el("td", { class: "domain url-cell", title: item.url }, shortUrl(item.url, 38)),
         el("td", { class: "category" }, categoryBadge(item)),
         el("td", { class: "sources" }, ...item.source_labels.map((s) => el("span", { class: "badge", title: s }, sourceLabel(s)))),
         editableCell(item, "remarks", item.remarks || ""),
@@ -450,6 +469,10 @@ function renderBulkbar() {
 }
 
 async function bulk(spec) {
+  return keepScroll(() => bulkNow(spec));
+}
+
+async function bulkNow(spec) {
   if (spec === "clear") {
     state.selected.clear();
     return renderRows();
@@ -477,7 +500,24 @@ async function bulk(spec) {
   await refresh();
 }
 
+// Run a triage action and put the page back where it was: rebuilding the list (and reopening the detail pane,
+// which hides and shows columns) would otherwise jump the scroll position.
+async function keepScroll(action) {
+  const y = window.scrollY;
+  const restore = () => window.scrollTo(0, y);
+  try {
+    return await action();
+  } finally {
+    restore();
+    requestAnimationFrame(restore); // after the layout settles
+  }
+}
+
 async function setKept(id, kept) {
+  return keepScroll(() => setKeptNow(id, kept));
+}
+
+async function setKeptNow(id, kept) {
   try {
     await api("PATCH", `/api/bookmarks/${id}`, { status: kept ? "kept" : "inbox" });
     toast(kept ? "Kept" : "Moved back to the Inbox", { label: "Undo", run: () => setKept(id, !kept) });
@@ -496,6 +536,10 @@ async function followDetail(id) {
 }
 
 async function setStarred(item, starred) {
+  return keepScroll(() => setStarredNow(item, starred));
+}
+
+async function setStarredNow(item, starred) {
   // Undo restores the status too, since starring an Inbox bookmark also keeps it.
   const before = { starred: Boolean(item.starred), status: item.status };
   try {
@@ -510,6 +554,10 @@ async function setStarred(item, starred) {
 }
 
 async function deleteOne(id) {
+  return keepScroll(() => deleteOneNow(id));
+}
+
+async function deleteOneNow(id) {
   try {
     await api("DELETE", `/api/bookmarks/${id}`);
     toast("Moved to Trash", { label: "Undo", run: () => restoreOne(id) });
@@ -521,6 +569,10 @@ async function deleteOne(id) {
 }
 
 async function restoreOne(id) {
+  return keepScroll(() => restoreOneNow(id));
+}
+
+async function restoreOneNow(id) {
   try {
     await api("POST", `/api/bookmarks/${id}/restore`);
     toast("Restored");
@@ -592,8 +644,8 @@ async function openDetail(id) {
         : el("button", { class: "danger", onclick: () => deleteOne(id) }, trashIcon(), " Move to Trash"),
     ),
     b.deleted_at ? el("p", { class: "warn" }, `In Trash since ${fmtDate(b.deleted_at)}. It stays deleted even if the tab is seen again.`) : null,
-    previewCard(b, href),
     row("URL", el("a", { href, target: "_blank", rel: "noopener noreferrer" }, b.url)),
+    previewCard(b, href),
     b.url_canonical !== b.url ? row("Canonical", b.url_canonical) : null,
     b.aliases.length > 1 ? row("Aliases", el("ul", {}, ...b.aliases.map((a) => el("li", {}, `${a.kind}: ${a.url_canonical}`)))) : null,
     row("Saved at",

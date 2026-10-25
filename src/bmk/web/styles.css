@@ -113,6 +113,7 @@ main h2 { font-size: 14px; }
   display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
 .fetch-mark { color: var(--warn-fg); cursor: help; }
 .grid td.domain { white-space: nowrap; color: var(--muted); }
+.grid td.url-cell { font-size: 11px; max-width: 250px; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .grid td.remarks { color: var(--muted); max-width: 220px; }
 .grid td.editable input { width: 100%; }
 .grid td.url { word-break: break-all; font-size: 12px; }

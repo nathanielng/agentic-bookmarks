@@ -565,3 +565,13 @@ def test_trashing_a_proposal_moves_the_bookmark_to_trash_without_logging(lib, co
     with pytest.raises(Conflict):
         changesets.trash_item(lib, cs_id, next(i["id"] for i in changesets.get(lib, cs_id)["items"] if i["decision"] == "applied"))
     assert ids
+
+
+def test_search_counts_show_where_matches_are(lib):
+    a = lib.add("https://one.example.com/x", title="We ran 94,000 trials of the thing")[1]
+    lib.add("https://two.example.com/y", title="Something else entirely")
+    lib.update(a, status="kept")
+    counts = lib.view_counts(q="94,000")
+    assert (counts["inbox"], counts["kept"], counts["active"], counts["trash"]) == (0, 1, 1, 0)
+    assert lib.browse(view="inbox", q="94,000")["total"] == 0 and lib.browse(view="kept", q="94,000")["total"] == 1
+    assert lib.view_counts()["inbox"] == 1  # without a search the counts are unchanged

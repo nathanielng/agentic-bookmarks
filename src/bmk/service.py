@@ -364,15 +364,21 @@ class Library:
         )
         return [dict(r) for r in self.conn.execute(sql, (*args, limit, offset))]
 
-    def count(self, view: str = "active", source_type: str | None = None, source_ref: str | None = None) -> int:
+    def count(self, view: str = "active", source_type: str | None = None, source_ref: str | None = None, q: str | None = None) -> int:
         where, args = self._view_filter(view)
         src_where, src_args = self._source_filter(source_type, source_ref)
         where, args = where + src_where, args + src_args
-        return self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b WHERE {' AND '.join(where) or '1'}", args).fetchone()[0]
+        join = ""
+        if q and (fts := _fts_query(q)):
+            join = " JOIN bookmarks_fts f ON f.rowid = b.id"
+            where.append("bookmarks_fts MATCH ?")
+            args.append(fts)
+        return self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b{join} WHERE {' AND '.join(where) or '1'}", args).fetchone()[0]
 
-    def view_counts(self, source_type: str | None = None, source_ref: str | None = None) -> dict[str, int]:
-        """Bookmarks per list, within one source (e.g. a device) if given, so the sidebar counts stack."""
-        return {view: self.count(view, source_type, source_ref) for view in VIEWS}
+    def view_counts(self, source_type: str | None = None, source_ref: str | None = None, q: str | None = None) -> dict[str, int]:
+        """Bookmarks per list, within one source (e.g. a device) and matching a search if given, so the sidebar
+        counts stack and show where the matches of a search are."""
+        return {view: self.count(view, source_type, source_ref, q) for view in VIEWS}
 
     @staticmethod
     def _source_filter(source_type: str | None, source_ref: str | None) -> tuple[list[str], list[Any]]:
