@@ -39,6 +39,13 @@ class Config:
     cloudtabs_exclude_devices: list[str] = field(default_factory=lambda: _env_list("BMK_CLOUDTABS_EXCLUDE_DEVICES"))
     resurrect_on_new_save: bool = field(default_factory=lambda: _env_bool("BMK_RESURRECT_ON_NEW_SAVE", False))
     display_tz: str = field(default_factory=lambda: os.getenv("BMK_DISPLAY_TZ", "Asia/Singapore"))
+    poll_interval: int = field(default_factory=lambda: int(os.getenv("BMK_POLL_INTERVAL", "1800")))
+    port: int = field(default_factory=lambda: int(os.getenv("BMK_PORT", "8765")))
+
+    @property
+    def token_path(self) -> Path:
+        """API write token, kept next to the database (0600)."""
+        return self.db_path.parent / "token"
 
 
 def get_config() -> Config:

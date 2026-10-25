@@ -14,9 +14,9 @@ from rich.table import Table
 
 from . import __version__, urls
 from .config import get_config
-from .ingest.cloudtabs import CloudTabsError, CloudTabsIngester
+from .ingest.cloudtabs import CloudTabsError, CloudTabsIngester, run_import
 from .service import Conflict, Library, NotFound
-from .timeutil import display
+from .timeutil import display, now_utc
 
 app = typer.Typer(help="Local-first bookmarks manager.", no_args_is_help=True, add_completion=False)
 ingest_app = typer.Typer(help="Import bookmarks from a source.", no_args_is_help=True)
@@ -80,25 +80,25 @@ def ingest_cloudtabs(
 ) -> None:
     """Import open tabs from Safari iCloud Tabs (CloudTabs.db)."""
     cfg = get_config()
-    ingester = CloudTabsIngester(
-        path=path or cfg.cloudtabs_path,
-        devices=devices or cfg.cloudtabs_devices,
-        exclude_devices=exclude or cfg.cloudtabs_exclude_devices,
-    )
-    params = {"path": str(ingester.path) if ingester.path else None, "devices": ingester.devices, "exclude": ingester.exclude_devices}
-    try:
-        items = list(ingester.read())
-    except CloudTabsError as exc:
-        if not dry_run:
-            _lib().record_failed_run("cloudtabs", str(exc), params)
-        _fail(str(exc))
     if dry_run:
+        ingester = CloudTabsIngester(
+            path=path or cfg.cloudtabs_path,
+            devices=devices or cfg.cloudtabs_devices,
+            exclude_devices=exclude or cfg.cloudtabs_exclude_devices,
+        )
+        try:
+            items = list(ingester.read())
+        except CloudTabsError as exc:
+            _fail(str(exc))
         for item in items:
             console.print(f"{item.source_ref} | {item.title or ''} | {item.url}", highlight=False, soft_wrap=True)
         console.print(f"{len(items)} tabs")
         return
-    summary = _lib().ingest("cloudtabs", items, params)
-    console.print(summary.line())
+    try:
+        summary = run_import(_lib(), cfg, path, devices, exclude)
+    except CloudTabsError as exc:
+        _fail(str(exc))
+    console.print(f"{now_utc()} {summary.line()}")
 
 
 @app.command()
@@ -242,8 +242,8 @@ def runs(
     # Short labels and a borderless table so a run fits on one line in an 80-column terminal.
     table = Table(box=box.SIMPLE_HEAD, header_style="bold")
     for col in ("Run", "Source", "Started", "Seen", "New", "Match", "Same", "Skip/Inv", "Supp"):
-        table.add_column(col, no_wrap=True, justify="left" if col in ("Source", "Started") else "right")
-    table.add_column("Error", no_wrap=True, overflow="ellipsis", max_width=60)
+        table.add_column(col, no_wrap=True, min_width=len(col), justify="left" if col in ("Source", "Started") else "right")
+    table.add_column("Error", no_wrap=True, overflow="ellipsis", min_width=5, max_width=60)
     for r in lib.import_runs(limit):
         table.add_row(
             str(r["id"]), r["source_type"], display(r["started_at"], "exact", lib.config.display_tz, short=True), str(r["items_seen"]),
@@ -278,6 +278,94 @@ def import_backup(file: Path) -> None:
     except (Conflict, ValueError) as exc:
         _fail(str(exc))
     console.print(", ".join(f"{k}={v}" for k, v in counts.items()))
+
+
+@app.command()
+def serve(
+    port: Annotated[Optional[int], typer.Option(help="Port on 127.0.0.1 (default: BMK_PORT or 8765).")] = None,
+    open_browser: Annotated[bool, typer.Option("--open", help="Open the UI in the default browser.")] = False,
+) -> None:
+    """Run the web UI and API on 127.0.0.1."""
+    try:
+        import uvicorn
+
+        from .api import create_app
+    except ImportError:
+        _fail('the web UI needs the "web" extra: uv pip install -e ".[web]"')
+    cfg = get_config()
+    port = port or cfg.port
+    url = f"http://127.0.0.1:{port}/"
+    console.print(f"bmk UI at {url}  (Ctrl-C to stop)")
+    if open_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    uvicorn.run(create_app(cfg), host="127.0.0.1", port=port, log_level="warning")
+
+
+_STATUS_STYLE = {"ok": "[green]OK  [/green]", "warn": "[yellow]WARN[/yellow]", "fail": "[red]FAIL[/red]"}
+
+
+@app.command()
+def doctor() -> None:
+    """Check database, Full Disk Access, the last scan and the background agent."""
+    from .doctor import FAIL, run_checks
+
+    checks = run_checks(get_config())
+    for c in checks:
+        console.print(f"{_STATUS_STYLE[c.status]} {c.name}: {c.detail}", highlight=False, soft_wrap=True)
+        if c.status != "ok" and c.fix:
+            for line in c.fix.splitlines():
+                console.print(f"       {line}", highlight=False, soft_wrap=True)
+    if any(c.status == FAIL for c in checks):
+        raise typer.Exit(1)
+
+
+launchd_app = typer.Typer(help="Background iCloud Tabs scan (launchd agent).", no_args_is_help=True)
+app.add_typer(launchd_app, name="launchd")
+
+
+@launchd_app.command("install")
+def launchd_install() -> None:
+    """Install (or update) the agent; it scans every BMK_POLL_INTERVAL seconds and at login."""
+    from . import launchd
+
+    cfg = get_config()
+    try:
+        st = launchd.install(cfg)
+    except RuntimeError as exc:
+        _fail(str(exc))
+    console.print(f"installed {st.plist_path} (every {cfg.poll_interval // 60} min, log: {launchd.LOG_PATH})", highlight=False)
+    console.print(
+        f"Grant Full Disk Access to [bold]{launchd.interpreter()}[/bold]\n"
+        "  System Settings → Privacy & Security → Full Disk Access → + → ⌘⇧G and paste the path.\n"
+        "  (Granting your terminal is not enough: launchd runs this interpreter directly.)\n"
+        "Then check with: bmk doctor",
+        highlight=False,
+    )
+
+
+@launchd_app.command("uninstall")
+def launchd_uninstall() -> None:
+    """Stop and remove the agent."""
+    from . import launchd
+
+    launchd.uninstall()
+    console.print("uninstalled")
+
+
+@launchd_app.command("status")
+def launchd_status() -> None:
+    """Show whether the agent is installed and loaded."""
+    from . import launchd
+
+    st = launchd.status()
+    console.print(
+        f"installed: {st.installed}  loaded: {st.loaded}  last exit: {st.last_exit if st.last_exit is not None else '—'}"
+        f"{'  ' + st.detail if st.detail else ''}\nplist: {st.plist_path}\nlog: {launchd.LOG_PATH}",
+        highlight=False,
+    )
 
 
 if __name__ == "__main__":

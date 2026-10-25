@@ -35,6 +35,10 @@ BACKUP_TABLES = (
 
 _SELECT_BOOKMARK = "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url FROM bookmarks b"
 
+# Smart lists available so far; Unprocessed, Failed, Duplicates and Categories arrive with CG3/CG5.
+VIEWS = ("active", "inbox", "date_unknown", "resaved", "trash")
+SORTS = {"saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
+
 
 class NotFound(LookupError):
     pass
@@ -337,14 +341,94 @@ class Library:
         where, args = self._view_filter(view)
         return self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b WHERE {' AND '.join(where) or '1'}", args).fetchone()[0]
 
+    def view_counts(self) -> dict[str, int]:
+        return {view: self.count(view) for view in VIEWS}
+
+    def browse(
+        self,
+        *,
+        view: str = "active",
+        q: str | None = None,
+        status: str | None = None,
+        source_type: str | None = None,
+        source_ref: str | None = None,
+        sort: str = "saved_at",
+        desc: bool = True,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """One page for the viewer: filters combine (view AND search AND status AND source), plus the total."""
+        where, args = self._view_filter(view)
+        join = ""
+        if q and (fts := _fts_query(q)):
+            join = " JOIN bookmarks_fts f ON f.rowid = b.id"
+            where.append("bookmarks_fts MATCH ?")
+            args.append(fts)
+        if status:
+            where.append("b.status = ?")
+            args.append(status)
+        if source_type or source_ref:
+            sub = ["s.bookmark_id = b.id"]
+            if source_type:
+                sub.append("s.source_type = ?")
+                args.append(source_type)
+            if source_ref:
+                sub.append("s.source_ref = ?")
+                args.append(source_ref)
+            where.append(f"EXISTS (SELECT 1 FROM sources s WHERE {' AND '.join(sub)})")
+        if sort not in SORTS:
+            raise ValueError(f"sort must be one of {', '.join(SORTS)}")
+        direction = "DESC" if desc else "ASC"
+        order = f"{SORTS[sort]} IS NULL, {SORTS[sort]} {direction}, b.id {direction}"
+        cond = " AND ".join(where) or "1"
+        total = self.conn.execute(f"SELECT COUNT(*) FROM bookmarks b{join} WHERE {cond}", args).fetchone()[0]
+        sql = (
+            "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url,"
+            " (SELECT json_group_array(DISTINCT CASE WHEN s.source_ref = '' THEN s.source_type ELSE s.source_ref END)"
+            "    FROM sources s WHERE s.bookmark_id = b.id) AS source_labels"
+            f" FROM bookmarks b{join} WHERE {cond} ORDER BY {order} LIMIT ? OFFSET ?"
+        )
+        items = []
+        for r in self.conn.execute(sql, (*args, limit, offset)):
+            item = dict(r)
+            item.pop("content_text", None)  # up to 20k chars each (CG3); the detail endpoint has it
+            item["locked_fields"] = json.loads(item["locked_fields"])
+            item["source_labels"] = json.loads(item["source_labels"] or "[]")
+            items.append(item)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def source_refs(self) -> list[dict[str, Any]]:
+        """Distinct (source_type, source_ref) pairs with active bookmark counts, e.g. one per device."""
+        sql = (
+            "SELECT s.source_type, s.source_ref, COUNT(DISTINCT s.bookmark_id) AS bookmarks FROM sources s"
+            " JOIN bookmarks b ON b.id = s.bookmark_id WHERE b.deleted_at IS NULL AND b.merged_into_id IS NULL"
+            " GROUP BY s.source_type, s.source_ref ORDER BY s.source_type, s.source_ref"
+        )
+        return [dict(r) for r in self.conn.execute(sql)]
+
+    def last_run(self, source_type: str) -> dict[str, Any] | None:
+        return _row(
+            self.conn.execute("SELECT * FROM import_runs WHERE source_type=? ORDER BY id DESC LIMIT 1", (source_type,)).fetchone()
+        )
+
     @staticmethod
     def _view_filter(view: str) -> tuple[list[str], list[Any]]:
+        live = ["b.merged_into_id IS NULL"]
         if view == "active":
-            return ["b.deleted_at IS NULL", "b.merged_into_id IS NULL"], []
+            return [*live, "b.deleted_at IS NULL"], []
+        if view == "inbox":
+            return [*live, "b.deleted_at IS NULL", "b.status = 'inbox'"], []
         if view == "trash":
-            return ["b.deleted_at IS NOT NULL", "b.merged_into_id IS NULL"], []
+            return [*live, "b.deleted_at IS NOT NULL"], []
         if view == "date_unknown":
-            return ["b.deleted_at IS NULL", "b.merged_into_id IS NULL", "b.saved_at IS NULL"], []
+            return [*live, "b.deleted_at IS NULL", "b.saved_at IS NULL"], []
+        if view == "resaved":
+            # Deleted, but a source has since reported a genuinely new save (§7.7).
+            return [
+                *live,
+                "b.deleted_at IS NOT NULL",
+                "EXISTS (SELECT 1 FROM import_items i WHERE i.bookmark_id = b.id AND i.outcome = 'suppressed_resaved')",
+            ], []
         if view == "all":
             return [], []
         raise ValueError(f"unknown view '{view}'")

@@ -8,15 +8,41 @@ AI/MCP interface follow in later phases — see [planning/PLAN05.md](planning/PL
 
 ## Status
 
-Code-generation phase **CG1** (core + CloudTabs + CLI). See PLAN05 §16–17.
+Code-generation phase **CG2** (web UI, background scan, `bmk doctor`). CG1 (core + CloudTabs + CLI) is
+done. See PLAN05 §16–17.
 
 ## Install
 
 ```bash
 source ~/.venv/bin/activate
-uv pip install -e ".[dev]"
+uv pip install -e ".[dev]"      # dev includes the web extra (fastapi, uvicorn)
 python -m pytest
 ```
+
+## Web UI
+
+```bash
+bmk serve --open                # http://127.0.0.1:8765/ (BMK_PORT to change)
+```
+
+Smart lists (All, Inbox, Date unknown, Deleted but saved again, Trash), per-device filters, search,
+sorting, inline edit (double-click a title or remark; edits are locked 🔒), status, bulk actions,
+delete with Undo, a detail pane (URLs, aliases, sources, history, set the saved date), import runs with
+per-item outcomes, and a Health panel. The server listens on 127.0.0.1 only and every write needs the
+token in `~/Library/Application Support/bmk/token`, which the served page carries.
+
+## Background scan (launchd)
+
+```bash
+bmk launchd install             # scans iCloud Tabs every 30 min (BMK_POLL_INTERVAL) and at login
+bmk launchd status
+bmk doctor                      # database, Full Disk Access, last scan, agent
+```
+
+launchd runs the Python interpreter directly, so **Full Disk Access must be granted to that
+interpreter**, not just your terminal; `bmk launchd install` and `bmk doctor` print its path. That grant
+covers anything run with this interpreter. Log: `~/Library/Logs/bmk/cloudtabs.log`. Remove with
+`bmk launchd uninstall`.
 
 ## Safari access (Full Disk Access)
 

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="bmk-token" content="{{BMK_TOKEN}}">
+  <title>Bookmarks</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Bookmarks</h1>
+    <input id="search" type="search" placeholder="Search title, URL, remarks…  ( / )" autocomplete="off">
+    <button id="scan" title="Read Safari iCloud Tabs now">Scan iCloud Tabs</button>
+    <a class="button" href="/api/export" download>Export JSON</a>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+  <div class="layout">
+    <nav class="sidebar">
+      <ul id="views"></ul>
+      <h2>Devices &amp; sources</h2>
+      <ul id="sources"></ul>
+      <h2>System</h2>
+      <ul>
+        <li><a href="#" data-panel="runs">Import runs</a></li>
+        <li><a href="#" data-panel="health">Health</a></li>
+      </ul>
+      <p class="version">bmk {{BMK_VERSION}}</p>
+    </nav>
+    <main id="main">
+      <section id="panel-bookmarks">
+        <div id="bulkbar" class="bulkbar" hidden>
+          <span id="bulkcount"></span>
+          <button data-bulk="status:read">Mark read</button>
+          <button data-bulk="status:archived">Archive</button>
+          <button data-bulk="status:inbox">Back to inbox</button>
+          <button data-bulk="delete" class="danger">Delete</button>
+          <button data-bulk="restore" class="trash-only">Restore</button>
+          <button data-bulk="clear" class="link">Clear selection</button>
+        </div>
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="check"><input type="checkbox" id="select-all" aria-label="Select all on this page"></th>
+              <th data-sort="saved_at">Saved at</th>
+              <th data-sort="title">Title</th>
+              <th data-sort="domain">Domain</th>
+              <th data-sort="status">Status</th>
+              <th>Sources</th>
+              <th>Remarks</th>
+              <th class="actions"></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="pager">
+          <button id="prev">‹ Prev</button>
+          <span id="pageinfo"></span>
+          <button id="next">Next ›</button>
+          <span class="hint">Double-click a title or remark to edit. Edited fields are locked 🔒 against automatic updates.</span>
+        </div>
+      </section>
+      <section id="panel-runs" hidden></section>
+      <section id="panel-health" hidden></section>
+    </main>
+    <aside id="detail" class="detail" hidden></aside>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -8,8 +8,10 @@ and -shm files are copied together) and the snapshot is read.
 """
 
 import logging
+import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -26,6 +28,8 @@ FDA_HELP = (
     "macOS blocked access to Safari's data. Grant Full Disk Access to the app running bmk:\n"
     "  System Settings → Privacy & Security → Full Disk Access → enable your terminal app\n"
     "  (Terminal, iTerm, VS Code, …), then quit and reopen it.\n"
+    "  For the background scan (bmk launchd), add this Python instead (+, then ⌘⇧G to paste the path):\n"
+    f"  {os.path.realpath(sys.executable)}\n"
     "  Shortcut: open 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'"
 )
 
@@ -170,6 +174,23 @@ def read_tabs(conn: sqlite3.Connection) -> list[Tab]:
         for r in rows
         if r[0]
     ]
+
+
+def run_import(lib, config, path: Path | None = None, devices: list[str] | None = None, exclude: list[str] | None = None):
+    """One poll for the CLI, API and launchd agent. A source that can't be read is recorded as a failed run
+    (so the UI can show it) and the CloudTabsError is re-raised."""
+    ingester = CloudTabsIngester(
+        path=path or config.cloudtabs_path,
+        devices=devices or config.cloudtabs_devices,
+        exclude_devices=exclude or config.cloudtabs_exclude_devices,
+    )
+    params = {"path": str(ingester.path) if ingester.path else None, "devices": ingester.devices, "exclude": ingester.exclude_devices}
+    try:
+        items = list(ingester.read())
+    except CloudTabsError as exc:
+        lib.record_failed_run(ingester.source_type, str(exc), params)
+        raise
+    return lib.ingest(ingester.source_type, items, params)
 
 
 @dataclass
