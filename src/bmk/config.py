@@ -58,6 +58,9 @@ class Config:
     decider_url: str | None = field(default_factory=lambda: os.getenv("BMK_DECIDER_URL") or None)
     decider_port: int = field(default_factory=lambda: int(os.getenv("BMK_DECIDER_PORT", "8091")))
     llama_server: str = field(default_factory=lambda: os.getenv("BMK_LLAMA_SERVER", "llama-server"))
+    # Classification: proposals at or above this confidence are approved and applied automatically (revertible,
+    # shown as AI-set); the rest wait for a person. 0 turns it off (everything is reviewed).
+    auto_approve_min: float = field(default_factory=lambda: float(os.getenv("BMK_AUTO_APPROVE_MIN", "0.9")))
     # MCP: read and propose tools are always on; single-item writes (add, edit, keep, star, trash) need this.
     mcp_allow_writes: bool = field(default_factory=lambda: _env_bool("BMK_MCP_ALLOW_WRITES", False))
 

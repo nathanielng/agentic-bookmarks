@@ -107,13 +107,35 @@ def get(lib: Library, changeset_id: int) -> dict[str, Any]:
     return cs
 
 
+def _name(lib: Library, op: str, value: Any) -> str | None:
+    """A category's name for the log: `value` is a category id (set_category) or {name, description} (add_category)."""
+    if op == "add_category":
+        return (value or {}).get("name")
+    if op == "merge":
+        return None
+    row = lib.conn.execute("SELECT name FROM categories WHERE id=?", (value,)).fetchone() if value is not None else None
+    return row[0] if row else None
+
+
+def _log(lib: Library, cs: dict[str, Any], item: dict[str, Any], outcome: str, by: str, final: Any = None, now: str | None = None) -> None:
+    """Record one decision. `item` is the row as proposed; `final` is the value that stands (default: as proposed)."""
+    value = item["new_value"] if final is None else final
+    lib.conn.execute(
+        "INSERT INTO review_log (at, changeset_id, item_id, kind, op, bookmark_id, proposed, final, confidence, rationale, outcome,"
+        " decided_by, model, prompt_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (now or now_utc(), item["changeset_id"], item["id"], cs["kind"], item["op"], item["bookmark_id"], _name(lib, item["op"], item["new_value"]),
+         _name(lib, item["op"], value), item["confidence"], item["rationale"], outcome, by, cs["model"], cs["prompt_version"]),
+    )  # fmt: skip
+
+
 def decide(lib: Library, changeset_id: int, decision: str, item_ids: list[int] | None = None,
-           min_confidence: float | None = None, new_values: dict[int, Any] | None = None) -> int:  # fmt: skip
+           min_confidence: float | None = None, new_values: dict[int, Any] | None = None, by: str = "human") -> int:  # fmt: skip
     """Approve or reject pending items: the listed ones, or every one at or above `min_confidence`, or all.
-    `new_values` overrides an item's proposed value before approving (e.g. a different category)."""
+    `new_values` overrides an item's proposed value before approving (e.g. a different category).
+    Each decision is written to the review log (`by` is 'human', or 'auto' for the auto-approve rule)."""
     if decision not in ("approved", "rejected", "pending"):
         raise ValueError("decision must be approved, rejected or pending")
-    cs = lib.conn.execute("SELECT status FROM changesets WHERE id=?", (changeset_id,)).fetchone()
+    cs = lib.conn.execute("SELECT status, kind, model, prompt_version FROM changesets WHERE id=?", (changeset_id,)).fetchone()
     if cs is None:
         raise NotFound(f"changeset {changeset_id} not found")
     if cs["status"] not in ("pending", "partial"):
@@ -125,12 +147,87 @@ def decide(lib: Library, changeset_id: int, decision: str, item_ids: list[int] |
     if min_confidence is not None:
         where.append("confidence >= ?")
         args.append(min_confidence)
+    if by == "auto":  # the rule never overrides a person's decision
+        where.append("decision = 'pending'")
     now = now_utc()
     with dbmod.transaction(lib.conn):
+        touched = []
+        if decision != "pending":  # the rows as proposed, before any override
+            for r in lib.conn.execute(f"SELECT * FROM changeset_items WHERE {' AND '.join(where)}", args).fetchall():
+                item = dict(r)
+                item["new_value"] = _loads(item["new_value"])
+                touched.append(item)
         for item_id, value in (new_values or {}).items():
             lib.conn.execute("UPDATE changeset_items SET new_value=? WHERE id=? AND changeset_id=?", (_dumps(value), item_id, changeset_id))
         cur = lib.conn.execute(f"UPDATE changeset_items SET decision=?, decided_at=? WHERE {' AND '.join(where)}", (decision, now, *args))
+        for item in touched:
+            final = (new_values or {}).get(item["id"])
+            changed = final is not None and final != item["new_value"]
+            outcome = "rejected" if decision == "rejected" else "corrected" if changed else "auto_approved" if by == "auto" else "approved"
+            _log(lib, cs, item, outcome, by, final, now)
     return cur.rowcount
+
+
+def auto_apply(lib: Library, changeset_id: int, min_confidence: float) -> dict[str, int]:
+    """Approve every pending item at or above `min_confidence` (logged as auto) and apply them; the rest
+    stay pending for a person. Returns {approved, applied, conflicts, left}."""
+    approved = decide(lib, changeset_id, "approved", min_confidence=min_confidence, by="auto") if min_confidence is not None else 0
+    result = apply(lib, changeset_id) if approved else {"applied": 0, "conflicts": 0, "left": 0}
+    return {"approved": approved, **result}
+
+
+def log_correction(lib: Library, bookmark_id: int, old_category: int | None, new_category: int | None) -> None:
+    """A person changed a category the AI had applied: the strongest sign the proposal was wrong."""
+    row = lib.conn.execute(
+        "SELECT i.*, c.kind, c.model, c.prompt_version FROM changeset_items i JOIN changesets c ON c.id = i.changeset_id"
+        " WHERE i.bookmark_id=? AND i.op='set_category' AND i.decision='applied' AND i.new_value=? ORDER BY i.id DESC LIMIT 1",
+        (bookmark_id, _dumps(old_category)),
+    ).fetchone()
+    if row is None:
+        return
+    item = dict(row)
+    item["new_value"] = _loads(item["new_value"])
+    _log(lib, item, item, "corrected_after_apply", "human", new_category)
+
+
+def review_stats(lib: Library, kind: str = "categorize") -> dict[str, Any]:
+    """How the AI did, from the latest decision per item and corrections after applying: accuracy by confidence
+    band, which categories get corrected into which, and whether the auto-approve threshold holds."""
+    rows = [dict(r) for r in lib.conn.execute(
+        "SELECT * FROM review_log WHERE kind=? AND id IN (SELECT MAX(id) FROM review_log WHERE kind=? AND item_id IS NOT NULL"
+        " AND outcome != 'corrected_after_apply' GROUP BY item_id) ORDER BY id", (kind, kind)).fetchall()]  # fmt: skip
+    fixed = {r["item_id"]: r for r in lib.conn.execute("SELECT * FROM review_log WHERE outcome='corrected_after_apply'")}
+    bands = [(0.9, 1.01, "90-100%"), (0.8, 0.9, "80-90%"), (0.6, 0.8, "60-80%"), (0.0, 0.6, "under 60%")]
+    out_bands = []
+    for lo, hi, label in bands:
+        group = [r for r in rows if r["confidence"] is not None and lo <= r["confidence"] < hi]
+        wrong = [r for r in group if r["outcome"] in ("corrected", "rejected") or r["item_id"] in fixed]
+        out_bands.append({"band": label, "decided": len(group), "auto": sum(r["decided_by"] == "auto" for r in group),
+                          "wrong": len(wrong), "accuracy": round(1 - len(wrong) / len(group), 3) if group else None})  # fmt: skip
+    confusions: dict[tuple[str, str], int] = {}
+    for r in rows:
+        final = fixed[r["item_id"]]["final"] if r["item_id"] in fixed else r["final"]
+        if r["outcome"] == "corrected" or r["item_id"] in fixed:
+            confusions[(r["proposed"], final)] = confusions.get((r["proposed"], final), 0) + 1
+        elif r["outcome"] == "rejected":
+            confusions[(r["proposed"], "(none)")] = confusions.get((r["proposed"], "(none)"), 0) + 1
+    return {"decisions": len(rows), "bands": out_bands,
+            "confusions": [{"proposed": a, "final": b, "count": n} for (a, b), n in sorted(confusions.items(), key=lambda kv: -kv[1])]}  # fmt: skip
+
+
+def export_labels(lib: Library, kind: str = "categorize") -> list[dict[str, Any]]:
+    """Labelled examples for tuning: the bookmark's text, what the AI proposed and what a person settled on.
+    Contains your bookmarks' content: write it only where you intend to (never into the repository)."""
+    out = []
+    for r in lib.conn.execute(
+        "SELECT l.*, b.title, b.domain, b.description, COALESCE(b.url_resolved, b.url_original) AS url,"
+        " (SELECT final FROM review_log f WHERE f.item_id = l.item_id AND f.outcome = 'corrected_after_apply' ORDER BY f.id DESC LIMIT 1) AS later"
+        " FROM review_log l JOIN bookmarks b ON b.id = l.bookmark_id WHERE l.kind=? AND l.decided_by='human' OR (l.kind=? AND l.outcome='corrected_after_apply')"
+        " ORDER BY l.id", (kind, kind)).fetchall():  # fmt: skip
+        label = r["later"] or r["final"]
+        out.append({"title": r["title"], "domain": r["domain"], "url": r["url"], "summary": r["description"], "proposed": r["proposed"],
+                    "confidence": r["confidence"], "label": None if r["outcome"] == "rejected" else label, "outcome": r["outcome"]})  # fmt: skip
+    return out
 
 
 def _conflict(lib: Library, item: dict[str, Any]) -> str | None:

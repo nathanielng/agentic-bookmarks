@@ -3,6 +3,7 @@ MCP server. The models are replaced with fakes; all data is synthetic."""
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 from typer.testing import CliRunner
@@ -249,8 +250,6 @@ def test_mcp_reads_and_proposes_without_changing(lib, config):
 
 def test_mcp_writes_only_when_allowed(lib, config):
     pytest.importorskip("mcp")
-    from dataclasses import replace
-
     from bmk.mcp_server import build_server
 
     server = build_server(replace(config, mcp_allow_writes=True))
@@ -307,8 +306,6 @@ def test_category_list_is_mirrored_to_a_settings_file(lib, config, tmp_path):
     saved = json.loads(config.categories_path.read_text())
     assert saved["categories"] == [{"name": "Programming", "description": "Pages about programming."}, {"name": "Travel", "description": "Trips."}]
 
-    from dataclasses import replace
-
     from bmk import db as dbmod
     from bmk.service import Library
 
@@ -334,6 +331,7 @@ def test_job_succeeds_and_hands_over_the_changeset(lib, config):
     seed(lib, 6)
     make_categories(lib)
     seen = []
+    config = replace(config, auto_approve_min=0)  # review everything
     job = run_job(lib, config, "categorize", choose=by_topic, on_progress=lambda j: seen.append((j["state"], j["done"])))
     assert (job["state"], job["done"], job["total"], job["errors"], job["pid"]) == ("succeeded", 6, 6, 0, None)
     assert seen[0] == ("running", 1)
@@ -373,6 +371,7 @@ def test_pause_and_resume_continue_where_it_stopped(lib, config):
     from bmk.ai import jobs
 
     seed(lib, 9)
+    config = replace(config, auto_approve_min=0)
     make_categories(lib, ("Cooking", "Programming"))  # travel pages are 'other': no item, must not be redone
     calls = []
 
@@ -477,3 +476,75 @@ def test_jobs_record_timing_for_estimates(lib, config, monkeypatch):
     assert (job["tokens_in"], job["model_seconds"], job["hardware"]) == (2000, 1.0, "Test chip, 8 GB")
     assert st["tokens_per_item"] == 500 and st["tokens_per_second"] == 2000 and "seconds_left" not in st
     assert jobs.rate(lib)["job"] == job["id"]
+
+
+# ---------------------------------------------------------------------------------------------- auto-approve and the review log
+
+
+def graded_choose(state, _instructions, options):
+    """Confident for recipes (0.95), unsure for python (0.6, close to travel), 'other' for travel."""
+    if "recipes.example.com" in state:
+        return {"Cooking": 0.95, "other": 0.05}
+    if "python.example.com" in state:
+        return {"Programming": 0.6, "Travel": 0.35, "other": 0.05}
+    return {"other": 1.0}
+
+
+def test_auto_approve_applies_only_the_confident_ones(lib, config):
+    ids = seed(lib, 9)
+    make_categories(lib)
+    job = run_job(lib, replace(config, auto_approve_min=0.9), "categorize", choose=graded_choose)
+    cs = changesets.get(lib, job["changeset_id"])
+    assert cs["status"] == "partial" and "3 applied automatically" in cs["summary"] and "3 left to review" in cs["summary"]
+    cooking = lib.category_by_name("Cooking")["id"]
+    assert [i for i in ids if lib.get(i)["category_id"] == cooking] == ids[0::3]
+    assert lib.get(ids[0])["category_assigned_by"] == "ai"
+    assert lib.get(ids[1])["category_id"] is None  # python pages wait for a person
+    assert cs["counts"] == {"applied": 3, "pending": 3}
+    log = [dict(r) for r in lib.conn.execute("SELECT outcome, decided_by FROM review_log")]
+    assert log == [{"outcome": "auto_approved", "decided_by": "auto"}] * 3
+
+
+def test_auto_approve_off_leaves_everything_for_review(lib, config):
+    seed(lib, 6)
+    make_categories(lib)
+    job = run_job(lib, replace(config, auto_approve_min=0), "categorize", choose=graded_choose)
+    assert changesets.get(lib, job["changeset_id"])["status"] == "pending"
+    assert lib.conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0] == 0
+
+
+def test_human_decisions_are_logged_and_corrections_counted(lib, config):
+    ids = seed(lib, 9)
+    make_categories(lib)
+    job = run_job(lib, replace(config, auto_approve_min=0.9), "categorize", choose=graded_choose)
+    cs_id = job["changeset_id"]
+    items = {i["bookmark_id"]: i for i in changesets.get(lib, cs_id)["items"]}
+    unsure = [items[b] for b in ids[1::3]]
+    travel = lib.category_by_name("Travel")["id"]
+    changesets.decide(lib, cs_id, "approved", item_ids=[unsure[0]["id"]])  # agrees
+    changesets.decide(lib, cs_id, "approved", item_ids=[unsure[1]["id"]], new_values={unsure[1]["id"]: travel})  # corrects
+    changesets.decide(lib, cs_id, "rejected", item_ids=[unsure[2]["id"]])
+    changesets.apply(lib, cs_id)
+    human = [(r["outcome"], r["proposed"], r["final"]) for r in lib.conn.execute("SELECT * FROM review_log WHERE decided_by='human' ORDER BY id")]
+    assert human == [("approved", "Programming", "Programming"), ("corrected", "Programming", "Travel"), ("rejected", "Programming", "Programming")]
+
+    lib.update(ids[0], category_id=travel)  # after applying, the user fixes an auto-approved one
+    assert lib.conn.execute("SELECT outcome, proposed, final FROM review_log ORDER BY id DESC LIMIT 1").fetchone()[:] == ("corrected_after_apply", "Cooking", "Travel")
+
+    stats = changesets.review_stats(lib)
+    top = stats["bands"][0]
+    assert (top["decided"], top["auto"], top["wrong"]) == (3, 3, 1)  # one of three auto-approved was fixed later
+    assert {(c["proposed"], c["final"]): c["count"] for c in stats["confusions"]} == {("Programming", "Travel"): 1, ("Programming", "(none)"): 1, ("Cooking", "Travel"): 1}
+    labels = changesets.export_labels(lib)
+    assert {"proposed": "Programming", "label": "Travel", "outcome": "corrected"}.items() <= next(l for l in labels if l["outcome"] == "corrected").items()
+    assert any(l["outcome"] == "rejected" and l["label"] is None for l in labels)
+
+
+def test_the_rule_never_overrides_a_person(lib, config):
+    seed(lib, 6)
+    make_categories(lib)
+    cs_id = categorize.run(lib, config, choose=graded_choose).changeset_id
+    item = next(i for i in changesets.get(lib, cs_id)["items"] if i["confidence"] >= 0.9)
+    changesets.decide(lib, cs_id, "rejected", item_ids=[item["id"]])
+    assert changesets.auto_apply(lib, cs_id, 0.9)["approved"] == 1  # the other confident one
+    assert [i["decision"] for i in changesets.get(lib, cs_id)["items"] if i["id"] == item["id"]] == ["rejected"]

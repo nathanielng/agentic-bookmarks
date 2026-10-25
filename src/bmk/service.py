@@ -556,6 +556,10 @@ class Library:
                     raise NotFound(f"category {cid} not found")
                 fields["category_id"] = cid
                 updates.update(category_id=cid, category_assigned_by="user")
+                if current.get("category_assigned_by") == "ai" and current.get("category_id") != cid:
+                    from . import changesets  # imported here: changesets imports this module
+
+                    changesets.log_correction(self, bookmark_id, current["category_id"], cid)
             if "url" in fields:
                 updates.update(self._url_change(current, fields["url"]))
             for key in list(fields):

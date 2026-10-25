@@ -275,6 +275,10 @@ def execute(lib: Library, config, job: dict[str, Any], *, choose=None, generator
                     _set(lib, job_id, state="cancelled", control=None, finished_at=now_utc(), message="cancelled")
                     _close_changeset(lib, r.changeset_id)
             else:
+                if config.auto_approve_min > 0:
+                    auto = changesets.auto_apply(lib, r.changeset_id, config.auto_approve_min)
+                    lib.conn.execute("UPDATE changesets SET summary = summary || ? WHERE id=?",
+                                     (f"; {auto['applied']} applied automatically (≥ {config.auto_approve_min:.0%}), {auto['left']} left to review", r.changeset_id))  # fmt: skip
                 summary = lib.conn.execute("SELECT summary FROM changesets WHERE id=?", (r.changeset_id,)).fetchone()[0]
                 _set(lib, job_id, state="succeeded_with_errors" if errors else "succeeded", changeset_id=r.changeset_id,
                      done=before_done + r.processed, total=before_done + r.total, errors=errors, message=summary,

@@ -112,13 +112,26 @@ queued, running, paused, succeeded, succeeded with errors (some bookmarks couldn
 failed, cancelled — with progress and Pause / Resume / Cancel. A paused classification resumes where it
 stopped; a cancelled one still hands over what it proposed. A job whose process dies is marked failed.
 
+**Auto-approve and learning from your reviews.** When a classification job finishes, proposals at or above
+`BMK_AUTO_APPROVE_MIN` (default 0.9; 0 reviews everything) are approved and applied automatically; they show as
+AI-set and can be reverted. Everything below waits in AI review. Every decision is logged in the library
+(`review_log`): auto-approved, approved, corrected to another category, rejected, and later corrections of
+something the AI applied. `bmk ai review-stats` shows accuracy by confidence band (is 0.9 safe?) and which
+categories get confused (reword their descriptions with `bmk categories edit`). `bmk ai export-labels file.jsonl`
+writes the decisions as labelled examples for tuning a model later (keep that file out of git).
+
 Your category list is also saved to `categories.json` next to the library (rewritten on every change; never
 in the repo). `bmk categories import [file]` loads it into another library.
 
 | Piece | Default | Setting |
 |---|---|---|
 | LLM (category list) | `mlx-community/Qwen3.8-27B-4bit` via mlx-lm (~16 GB; 24 GB Macs work) | `BMK_LLM_MODEL` |
-| Decision model | JevK5-9B Q5_K_M GGUF via llama.cpp's `llama-server` (~6.5 GB, ~1 s per bookmark) | `BMK_DECIDER_*` |
+| Decision model | JevK5-9B Q5_K_M GGUF via llama.cpp's `llama-server` (~6.5 GB) | `BMK_DECIDER_*` |
+
+Measured on an Apple M5 with 24 GB: classifying 450 bookmarks took 21 minutes, about 2.8 s per bookmark.
+Each prompt was about 900 input tokens (title, site, summary and the start of the page text) at roughly
+325 tokens/s. Proposing categories took a few minutes. Speeds depend on the chip and memory; every job
+records its own timings, and the UI estimates a new run from the last one.
 
 ```bash
 uv pip install -e ".[ai,mcp]" && scripts/install-ai.sh   # mlx-lm, MCP SDK; jevk5 client (+ brew install llama.cpp)

@@ -864,6 +864,39 @@ def ai_cancel(job_id: int) -> None:
     _job_control(job_id, "cancel")
 
 
+@ai_app.command("review-stats")
+def ai_review_stats() -> None:
+    """How accurate the AI's classifications were, from your review decisions: by confidence band and by mistake.
+    Use it to set BMK_AUTO_APPROVE_MIN and to find category descriptions that need rewording."""
+    from . import changesets
+
+    lib = _lib()
+    stats = changesets.review_stats(lib)
+    if not stats["decisions"]:
+        console.print("No review decisions yet.")
+        return
+    table = Table("Confidence", "Decided", "Auto-approved", "Wrong", "Accuracy", box=box.SIMPLE_HEAD, header_style="bold")
+    for b in stats["bands"]:
+        table.add_row(b["band"], str(b["decided"]), str(b["auto"]), str(b["wrong"]), f"{b['accuracy']:.0%}" if b["accuracy"] is not None else "")
+    console.print(table)
+    if stats["confusions"]:
+        console.print("[bold]Corrections[/bold] (the AI proposed → you chose)")
+        for c in stats["confusions"][:15]:
+            console.print(f"  {c['count']:>3}  {escape(c['proposed'] or '')} → {escape(c['final'] or '')}", highlight=False)
+        console.print("Reword the descriptions of categories that are often confused (`bmk categories edit`).")
+
+
+@ai_app.command("export-labels")
+def ai_export_labels(path: Annotated[Path, typer.Argument(help="JSONL file to write.")]) -> None:
+    """Write your review decisions as labelled examples (for tuning). Contains your bookmarks' content: keep it out of git."""
+    from . import changesets
+
+    lib = _lib()
+    rows = changesets.export_labels(lib)
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    console.print(f"wrote {len(rows)} examples to {path}")
+
+
 @ai_app.command("run-jobs", hidden=True)
 def ai_run_jobs() -> None:
     """Run queued jobs one after another (started detached by the web UI and --background)."""

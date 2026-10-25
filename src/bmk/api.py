@@ -436,6 +436,11 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
         with library() as lib:
             return changesets.revert(lib, changeset_id)
 
+    @app.get("/api/ai/review-stats")
+    def ai_review_stats() -> dict[str, Any]:
+        with library() as lib:
+            return changesets.review_stats(lib)
+
     @app.get("/api/ai/status")
     def ai_status() -> dict[str, Any]:
         from .ai import models
