@@ -246,6 +246,21 @@ def keep(bookmark_ids: list[int]) -> None:
 
 
 @app.command()
+def star(
+    bookmark_ids: list[int],
+    off: Annotated[bool, typer.Option("--off", help="Remove the star (the bookmark stays kept).")] = False,
+) -> None:
+    """Star bookmarks: keep them and add them to the Starred list."""
+    lib = _lib()
+    for bookmark_id in bookmark_ids:
+        try:
+            lib.update(bookmark_id, starred=not off)
+        except NotFound as exc:
+            _fail(str(exc))
+        console.print(f"{'unstarred' if off else 'starred'} #{bookmark_id}")
+
+
+@app.command()
 def restore(bookmark_ids: list[int]) -> None:
     """Restore bookmarks from Trash."""
     lib = _lib()

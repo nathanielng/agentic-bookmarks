@@ -26,7 +26,8 @@ bmk serve --open                # http://127.0.0.1:8765/ (BMK_PORT to change)
 ```
 
 **Triage:** everything new lands in the **Inbox**. Each row has **✓ Keep** (moves it to **Kept**) and
-**🗑 Trash**; both have Undo, and Trash → Restore works any time. Keys: ↓ ↑ move, K keep, D trash,
+**🗑 Trash**; both have Undo, and Trash → Restore works any time. **☆ Star** keeps a bookmark and adds it
+to **Starred**, a short list of the most interesting ones. Keys: ↓ ↑ move, S star, K keep, D trash,
 O open, Enter details. A bookmark is stored in the local library as soon as it is scanned, so closing
 the tab on your phone never loses it.
 
@@ -99,6 +100,7 @@ bmk search "bedrock agents"
 bmk show 12
 bmk edit 12 --title "Better title" --saved-at 2026-10-01T09:00+08:00   # edited fields are locked
 bmk keep 12                               # Inbox → Kept
+bmk star 12 [--off]                       # keep + Starred (or remove the star)
 bmk list --view unprocessed | failed      # not fetched yet / fetch failed or blocked
 bmk rm 12 && bmk restore 12               # soft delete / Trash
 bmk runs                                  # import history; `bmk runs <id>` for per-item outcomes

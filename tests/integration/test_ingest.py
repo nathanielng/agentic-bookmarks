@@ -162,6 +162,20 @@ def test_status_validation(lib):
     assert lib.update(bid, status="kept")["status"] == "kept"
 
 
+def test_star_keeps_and_inbox_unstars(lib):
+    ingest(lib, RawItem(url="https://e.com/", source_ref="f", locator="1"))
+    bid = lib.list()[0]["id"]
+    b = lib.update(bid, starred=True)
+    assert b["starred"] == 1 and b["status"] == "kept" and b["locked_fields"] == []
+    assert lib.count("starred") == 1 and lib.count("kept") == 1 and lib.count("inbox") == 0
+    b = lib.update(bid, starred=False)
+    assert b["starred"] == 0 and b["status"] == "kept"  # unstarring keeps it
+    lib.update(bid, starred=True)
+    b = lib.update(bid, status="inbox")
+    assert b["starred"] == 0 and b["status"] == "inbox"  # back to the Inbox clears the star
+    assert [e["kind"] for e in b["events"]].count("edit") == 4
+
+
 def test_search(lib):
     ingest(
         lib,

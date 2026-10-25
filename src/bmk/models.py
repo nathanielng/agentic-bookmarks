@@ -54,6 +54,8 @@ class ImportSummary:
         return f"run {self.run_id} [{self.source_type}] seen={self.seen} " + " ".join(parts)
 
 
-EDITABLE_FIELDS = ("title", "url", "remarks", "saved_at", "status")
+EDITABLE_FIELDS = ("title", "url", "remarks", "saved_at", "status", "starred")
+# Triage fields: edited by the user, but never locked (nothing automatic changes them).
+TRIAGE_FIELDS = ("status", "starred")
 # Triage: everything new lands in the Inbox until it is kept (or moved to Trash, which is deleted_at).
 STATUSES = ("inbox", "kept")

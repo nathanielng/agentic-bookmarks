@@ -200,10 +200,12 @@ def create_app(config: Config | None = None, background: bool = False) -> FastAP
                     lib.restore(bookmark_id)
                 elif action == "status":
                     lib.update(bookmark_id, status=payload.get("status"))
+                elif action == "star":
+                    lib.update(bookmark_id, starred=bool(payload.get("starred", True)))
                 elif action == "refetch":
                     lib.refetch([bookmark_id])
                 else:
-                    raise ValueError("action must be delete, restore, status or refetch")
+                    raise ValueError("action must be delete, restore, status, star or refetch")
         if action == "refetch":
             kick()
         return {"ok": True, "count": len(ids)}

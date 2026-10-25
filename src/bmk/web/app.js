@@ -6,6 +6,7 @@ const APPROXIMATE = new Set(["first_seen_initial", "file_birthtime", "file_mtime
 const VIEW_LABELS = {
   inbox: "Inbox",
   kept: "Kept",
+  starred: "Starred",
   active: "All",
   unprocessed: "Not fetched yet",
   failed: "Fetch failed / blocked",
@@ -272,6 +273,7 @@ function icon(...paths) {
   return svg;
 }
 const trashIcon = () => icon("M3 6h18", "M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2", "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", "M10 11v6", "M14 11v6");
+const starIcon = () => icon("M12 2.8l2.8 5.8 6.4.9-4.6 4.5 1.1 6.4L12 17.4l-5.7 3 1.1-6.4-4.6-4.5 6.4-.9z");
 const keepIcon = () => icon("M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", "M8 12.5l2.5 2.5L16 9.5");
 
 // Row actions: Keep (Inbox → Kept, or back) and Trash, or Restore when the bookmark is in Trash.
@@ -280,7 +282,15 @@ function actionButtons(item) {
     return [el("button", { class: "link", title: "Restore from Trash", onclick: (e) => { e.stopPropagation(); restoreOne(item.id); } }, "Restore")];
   }
   const kept = item.status === "kept";
+  const starred = Boolean(item.starred);
   return [
+    el("button", {
+      class: `link icon-button star${starred ? " on" : ""}`,
+      title: starred ? "Starred. Click to remove the star (stays kept)" : "Star (S): keep it and add it to Starred",
+      "aria-label": starred ? "Remove star" : "Star",
+      "aria-pressed": starred ? "true" : "false",
+      onclick: (e) => { e.stopPropagation(); setStarred(item, !starred); },
+    }, starIcon()),
     el("button", {
       class: `link icon-button keep${kept ? " on" : ""}`,
       title: kept ? "Kept. Click to move back to the Inbox" : "Keep (K): move from the Inbox to Kept",
@@ -370,6 +380,10 @@ function triageKey(e) {
     case "K":
       if (item && !item.deleted_at) setKept(item.id, item.status !== "kept");
       return Boolean(item);
+    case "s":
+    case "S":
+      if (item && !item.deleted_at) setStarred(item, !item.starred);
+      return Boolean(item);
     case "d":
     case "D":
     case "Delete":
@@ -414,6 +428,8 @@ async function bulk(spec) {
     state.selected.clear();
     if (action === "delete") {
       toast(`${ids.length} moved to Trash`, { label: "Undo", run: () => api("POST", "/api/bookmarks/bulk", { ids, action: "restore" }).then(refresh) });
+    } else if (action === "star") {
+      toast(`${ids.length} starred`);
     } else if (action === "refetch") {
       toast(`${ids.length} queued to fetch again`);
     } else if (spec === "status:kept") {
@@ -443,6 +459,20 @@ async function followDetail(id) {
   if ($("#detail").hidden) return;
   const next = state.items.some((i) => i.id === id) ? id : state.items[state.cursor]?.id;
   return next ? openDetail(next) : closeDetail();
+}
+
+async function setStarred(item, starred) {
+  // Undo restores the status too, since starring an Inbox bookmark also keeps it.
+  const before = { starred: Boolean(item.starred), status: item.status };
+  try {
+    await api("PATCH", `/api/bookmarks/${item.id}`, { starred });
+    toast(starred ? "Starred" : "Star removed", { label: "Undo", run: () =>
+      api("PATCH", `/api/bookmarks/${item.id}`, before).then(refresh).then(() => followDetail(item.id)).catch(showError) });
+  } catch (err) {
+    showError(err);
+  }
+  await refresh();
+  await followDetail(item.id);
 }
 
 async function deleteOne(id) {
@@ -516,6 +546,9 @@ async function openDetail(id) {
     el("div", { class: "detail-actions" },
       href ? el("a", { class: "button", href, target: "_blank", rel: "noopener noreferrer" }, "Open") : null,
       el("button", { onclick: () => navigator.clipboard.writeText(b.url).then(() => toast("URL copied")) }, "Copy URL"),
+      b.deleted_at ? null
+        : el("button", { class: `star${b.starred ? " on" : ""}`, title: b.starred ? "Remove the star (stays kept)" : "Keep it and add it to Starred",
+          onclick: () => setStarred(b, !b.starred) }, starIcon(), b.starred ? " Starred" : " Star"),
       b.deleted_at ? null
         : b.status === "kept"
           ? el("button", { class: "keep on", title: "Move back to the Inbox", onclick: () => setKept(id, false) }, keepIcon(), " Kept")

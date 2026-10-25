@@ -14,7 +14,7 @@ from typing import Any
 from . import db as dbmod
 from . import urls
 from .config import Config, get_config
-from .models import EDITABLE_FIELDS, STATUSES, ImportSummary, RawItem
+from .models import EDITABLE_FIELDS, STATUSES, TRIAGE_FIELDS, ImportSummary, RawItem
 from .timeutil import better_saved_at, now_utc, parse_iso, to_iso
 
 log = logging.getLogger(__name__)
@@ -37,12 +37,12 @@ BACKUP_TABLES = (
 _SELECT_BOOKMARK = "SELECT b.*, COALESCE(b.url_resolved, b.url_original) AS url FROM bookmarks b"
 
 # Smart lists available so far; Duplicates and Categories arrive with CG5.
-VIEWS = ("inbox", "kept", "active", "unprocessed", "failed", "date_unknown", "resaved", "trash")
+VIEWS = ("inbox", "kept", "starred", "active", "unprocessed", "failed", "date_unknown", "resaved", "trash")
 # Enrichment outcomes (bookmarks.fetch_status) that put a bookmark in the "failed" list.
 FETCH_FAILED = ("failed", "needs_browser")
 # Merge survivor: the more advanced triage status wins.
 _STATUS_RANK = {"inbox": 0, "kept": 1}
-SORTS = {"saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
+SORTS = {"starred": "b.starred", "saved_at": "b.saved_at", "title": "lower(b.title)", "domain": "b.domain", "status": "b.status", "id": "b.id"}
 
 
 class NotFound(LookupError):
@@ -454,6 +454,8 @@ class Library:
             return [*live, "b.deleted_at IS NULL", "b.status = 'inbox'"], []
         if view == "kept":
             return [*live, "b.deleted_at IS NULL", "b.status = 'kept'"], []
+        if view == "starred":
+            return [*live, "b.deleted_at IS NULL", "b.starred = 1"], []
         if view == "trash":
             return [*live, "b.deleted_at IS NOT NULL"], []
         if view == "unprocessed":
@@ -515,17 +517,24 @@ class Library:
                 if fields["status"] not in STATUSES:
                     raise ValueError(f"status must be one of {', '.join(STATUSES)}")
                 updates["status"] = fields["status"]
+                if fields["status"] == "inbox" and current["starred"] and "starred" not in fields:
+                    fields["starred"] = False  # back to the Inbox means "not decided": no star either
+            if "starred" in fields:
+                updates["starred"] = int(bool(fields["starred"]))
+                if updates["starred"] and current["status"] == "inbox" and "status" not in fields:
+                    fields["status"] = "kept"  # starring keeps it
+                    updates["status"] = "kept"
             if "saved_at" in fields:
                 updates.update(saved_at=to_iso(parse_iso(fields["saved_at"])), saved_at_source="user")
             if "url" in fields:
                 updates.update(self._url_change(current, fields["url"]))
-            for key in fields:
+            for key in list(fields):
                 column = "url_canonical" if key == "url" else key
                 old = current["url"] if key == "url" else current.get(column)
                 new = fields[key] if key == "url" else updates.get(column)
                 if old != new:
                     changes[key] = [old, new]
-                    if key != "status":
+                    if key not in TRIAGE_FIELDS:
                         locked.add(key)
             if not changes:
                 return current
@@ -698,6 +707,8 @@ class Library:
             updates["remarks"] = remarks[0]
         if _STATUS_RANK.get(loser["status"], 0) > _STATUS_RANK.get(survivor["status"], 0):
             updates["status"] = loser["status"]
+        if loser["starred"] and not survivor["starred"]:
+            updates["starred"] = 1
         for col in ("description", "site_name", "author", "published_at", "image_url", "content_text", "canonical_hint"):
             if not survivor[col] and loser[col]:
                 updates[col] = loser[col]
