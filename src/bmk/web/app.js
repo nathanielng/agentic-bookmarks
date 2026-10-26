@@ -249,6 +249,38 @@ async function loadBookmarks() {
   state.items = page.items;
   state.total = page.total;
   renderRows();
+  await loadTrashHits(params, page.total);
+}
+
+// A search with few hits also looks in Trash, since a bookmark you deleted is easy to forget. Few hits only
+// (fewer than TRASH_IF_FEWER_THAN in this list); up to TRASH_MAX_SHOWN are listed, more is just a link.
+const TRASH_IF_FEWER_THAN = 5;
+const TRASH_MAX_SHOWN = 10;
+
+async function loadTrashHits(params, total) {
+  const box = $("#trash-hits");
+  box.replaceChildren();
+  if (!state.q || state.view === "trash" || state.offset || total >= TRASH_IF_FEWER_THAN) return;
+  const p = new URLSearchParams(params);
+  p.set("view", "trash");
+  p.set("sort", "saved_at");
+  p.set("desc", "true");
+  p.set("limit", TRASH_MAX_SHOWN);
+  const hits = await api("GET", `/api/bookmarks?${p}`);
+  if (!hits.total) return;
+  const head = el("h4", {}, `Also in Trash (${hits.total})`);
+  if (hits.total > TRASH_MAX_SHOWN) {
+    box.append(head, el("p", { class: "muted" }, `Too many to list here. `,
+      el("a", { href: "#", onclick: (e) => { e.preventDefault(); selectView("trash"); } }, `Show all ${hits.total} in Trash`)));
+    return;
+  }
+  box.append(head, el("table", { class: "grid trash-grid" }, el("tbody", {}, ...hits.items.map((item) =>
+    el("tr", { onclick: () => openDetail(item.id) },
+      el("td", { class: "date" }, fmtDate(item.saved_at, item.saved_at_source)),
+      el("td", {}, el("span", { class: item.title ? "" : "untitled" }, item.title || fallbackTitle(item.url))),
+      el("td", { class: "url-cell", title: item.url }, shortUrl(item.url, 38)),
+      el("td", { class: "actions" }, el("button", { class: "link", title: "Restore from Trash",
+        onclick: (e) => { e.stopPropagation(); restoreOne(item.id); } }, "Restore")))))));
 }
 
 const FETCH_LABELS = {

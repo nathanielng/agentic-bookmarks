@@ -270,3 +270,6 @@ input.narrow { width: 64px; }
 #adder input, #adder textarea { width: 100%; box-sizing: border-box; font: inherit; }
 #adder .error { color: var(--danger, #c0392b); margin: 4px 0; min-height: 1em; }
 #adder .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+#trash-hits:not(:empty) { margin: 14px 0 6px; opacity: 0.85; }
+#trash-hits h4 { margin: 0 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+#trash-hits .trash-grid td { cursor: pointer; }
