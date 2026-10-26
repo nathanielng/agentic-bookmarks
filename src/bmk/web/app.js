@@ -235,7 +235,7 @@ function selectCategory(category) {
 
 // ------------------------------------------------------------------ table
 
-async function loadBookmarks() {
+async function loadBookmarks(seq = refreshSeq) {
   const params = new URLSearchParams({
     view: state.view, sort: state.sort, desc: state.desc, limit: state.limit, offset: state.offset,
   });
@@ -246,10 +246,11 @@ async function loadBookmarks() {
     if (state.source.source_ref) params.set("source_ref", state.source.source_ref);
   }
   const page = await api("GET", `/api/bookmarks?${params}`);
+  if (seq !== refreshSeq) return;
   state.items = page.items;
   state.total = page.total;
   renderRows();
-  await loadTrashHits(params, page.total);
+  await loadTrashHits(params, page.total, seq);
 }
 
 // A search with few hits also looks in Trash, since a bookmark you deleted is easy to forget. Few hits only
@@ -257,7 +258,7 @@ async function loadBookmarks() {
 const TRASH_IF_FEWER_THAN = 5;
 const TRASH_MAX_SHOWN = 10;
 
-async function loadTrashHits(params, total) {
+async function loadTrashHits(params, total, seq) {
   const box = $("#trash-hits");
   box.replaceChildren();
   if (!state.q || state.view === "trash" || state.offset || total >= TRASH_IF_FEWER_THAN) return;
@@ -267,7 +268,7 @@ async function loadTrashHits(params, total) {
   p.set("desc", "true");
   p.set("limit", TRASH_MAX_SHOWN);
   const hits = await api("GET", `/api/bookmarks?${p}`);
-  if (!hits.total) return;
+  if (!hits.total || seq !== refreshSeq) return;
   const head = el("h4", {}, `Also in Trash (${hits.total})`);
   if (hits.total > TRASH_MAX_SHOWN) {
     box.append(head, el("p", { class: "muted" }, `Too many to list here. `,
@@ -885,10 +886,15 @@ async function loadLog() {
 
 // ------------------------------------------------------------------ wiring
 
+let refreshSeq = 0;
 async function refresh() {
+  const seq = ++refreshSeq; // a slower, older response must not overwrite a newer one
   try {
-    await loadMeta();
-    if (state.panel === "bookmarks") await loadBookmarks();
+    const meta = loadMeta();
+    if (state.panel === "bookmarks") {
+      await Promise.all([meta, loadBookmarks(seq)]);
+      if (state.q && seq === refreshSeq) renderRows(); // the empty-state "Found in" needs the counts
+    } else await meta;
     if (state.panel === "runs") await loadRuns();
   } catch (err) {
     showError(err);
@@ -1474,16 +1480,24 @@ async function addUrl() {
 }
 $("#add-url").addEventListener("click", addUrl);
 
+// Search runs 400 ms after the last keystroke, only for 2+ characters (or when cleared); Enter runs it at once.
+const SEARCH_DELAY_MS = 400;
+const SEARCH_MIN_CHARS = 2;
 let searchTimer;
-$("#search").addEventListener("input", (e) => {
+function runSearch() {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    state.q = e.target.value.trim();
-    state.offset = 0;
-    if (state.panel !== "bookmarks") showPanel("bookmarks");
-    refresh();
-  }, 250);
+  const q = $("#search").value.trim();
+  if (q.length === 1 || q === state.q) return;
+  state.q = q;
+  state.offset = 0;
+  if (state.panel !== "bookmarks") showPanel("bookmarks");
+  refresh();
+}
+$("#search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, SEARCH_DELAY_MS);
 });
+$("#search").addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
 document.addEventListener("keydown", (e) => {
   if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
     e.preventDefault();
